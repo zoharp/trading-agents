@@ -6,12 +6,28 @@ import remarkGfm from 'remark-gfm';
 
 type EventKind = 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'final' | 'escalation' | 'error';
 
+interface Stance {
+  stance: 'bullish' | 'bearish' | 'neutral' | 'unknown';
+  conviction: number;
+  agree: 'yes' | 'no' | 'partial' | 'unknown';
+  disagreement: string;
+}
+
 interface Turn {
-  kind: 'system' | 'turn' | 'final' | 'escalation';
+  kind: 'system' | 'turn' | 'summary' | 'final' | 'escalation';
   agent?: 'Elena' | 'Marcus';
   round?: number;
   text: string;
   done: boolean;
+  stance?: Stance;
+  summary?: {
+    round: number;
+    elena: Stance;
+    marcus: Stance;
+    consensus: boolean;
+    agreementScore: number;
+  };
+  resumeState?: any;
 }
 
 interface Cost {
@@ -25,11 +41,34 @@ export default function Home() {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [running, setRunning] = useState(false);
   const [cost, setCost] = useState<Cost>({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
+  const [sessionCostTotal, setSessionCostTotal] = useState<number>(0);
+  const [model, setModel] = useState<string>('claude-sonnet-4-6');
+  const [canResume, setCanResume] = useState<boolean>(false);
+  const [resumeState, setResumeState] = useState<any>(null);
+  const [debugInfo, setDebugInfo] = useState<{ systemPrompt: string; messages: any[] } | null>(null);
+  const [showDebug, setShowDebug] = useState<boolean>(false);
 
   const abortRef = useRef<AbortController | null>(null);
   const userScrolledUp = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const turnIdRef = useRef(0);
+
+  // Load session cost total on mount
+  useEffect(() => {
+    async function loadSessionCost() {
+      try {
+        const res = await fetch('/api/debate-costs');
+        if (res.ok) {
+          const data = await res.json();
+          const total = data.costs?.reduce((sum: number, c: any) => sum + c.costUsd, 0) || 0;
+          setSessionCostTotal(total);
+        }
+      } catch (e) {
+        // Ignore errors
+      }
+    }
+    loadSessionCost();
+  }, []);
 
   // Smart scroll: track if user scrolled up
   useEffect(() => {
@@ -58,8 +97,11 @@ export default function Home() {
   async function submit() {
     if (!input.trim() || running) return;
     setRunning(true);
-    setTurns([]);
-    setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
+    if (!resumeState) {
+      setTurns([]);
+      setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
+      setCanResume(false);
+    }
     userScrolledUp.current = false;
     turnIdRef.current = 0;
 
@@ -69,7 +111,11 @@ export default function Home() {
     const res = await fetch('/api/debate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request: input }),
+      body: JSON.stringify({
+        request: resumeState ? `Continue debate: ${input}` : input,
+        model,
+        resumeFrom: resumeState,
+      }),
       signal: controller.signal,
     });
 
@@ -105,16 +151,68 @@ export default function Home() {
       setTurns(prev => prev.map(t => ({ ...t, done: true })));
       setRunning(false);
       abortRef.current = null;
+
+      // Reload session cost
+      async function reloadCost() {
+        try {
+          const res = await fetch('/api/debate-costs');
+          if (res.ok) {
+            const data = await res.json();
+            const total = data.costs?.reduce((sum: number, c: any) => sum + c.costUsd, 0) || 0;
+            setSessionCostTotal(total);
+          }
+        } catch {}
+      }
+      reloadCost();
     }
   }
 
+  function deduplicateText(text: string): string {
+    // Split into sentences (split on . ! ? followed by space)
+    const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+
+    for (let i = 0; i < sentences.length; i++) {
+      const normalized = sentences[i].trim().toLowerCase();
+      // Skip if we've seen this exact sentence recently (within last 3 sentences)
+      let isDuplicate = false;
+      for (let j = Math.max(0, i - 3); j < i; j++) {
+        if (seen.has(sentences[j].trim().toLowerCase())) {
+          if (normalized === sentences[j].trim().toLowerCase()) {
+            isDuplicate = true;
+            break;
+          }
+        }
+      }
+      if (!isDuplicate) {
+        deduped.push(sentences[i]);
+        seen.add(normalized);
+      }
+    }
+
+    return deduped.join(' ');
+  }
+
   function handleEvent(evt: any) {
+    if (evt.type === 'debug') {
+      setDebugInfo(evt.debug);
+      setShowDebug(true);
+      return;
+    }
+
     if (evt.type === 'usage') {
-      // Update cost panel with token usage
+      // Update cost panel with token usage (calculate based on model)
+      const pricing: Record<string, [number, number]> = {
+        'claude-opus-4-7': [15, 75],
+        'claude-sonnet-4-6': [3, 15],
+        'claude-haiku-4-5-20251001': [0.8, 4],
+      };
+      const [inputPrice, outputPrice] = pricing[model] || [3, 15];
       setCost({
         inputTokens: evt.totalInputTokens,
         outputTokens: evt.totalOutputTokens,
-        totalUsd: (evt.totalInputTokens * 3 + evt.totalOutputTokens * 15) / 1_000_000,
+        totalUsd: (evt.totalInputTokens * inputPrice + evt.totalOutputTokens * outputPrice) / 1_000_000,
       });
     }
 
@@ -129,13 +227,28 @@ export default function Home() {
         if (last && last.agent === evt.agent && !last.done) {
           last.text += evt.text || '';
         }
-      } else if (evt.type === 'turn-end') {
+      } else if (evt.type === 'turn-end' && evt.stance) {
         const last = copy[copy.length - 1];
-        if (last) last.done = true;
+        if (last) {
+          last.done = true;
+          last.stance = evt.stance;
+          last.text = deduplicateText(last.text);
+          if (evt.resumeState) {
+            last.resumeState = evt.resumeState;
+            setResumeState(evt.resumeState);
+            setCanResume(true);
+          }
+        }
+      } else if (evt.type === 'round-summary' && evt.summary) {
+        copy.push({ kind: 'summary', round: evt.summary.round, text: '', done: true, summary: evt.summary });
       } else if (evt.type === 'final') {
-        copy.push({ kind: 'final', text: evt.text || '', done: true });
+        copy.push({ kind: 'final', text: deduplicateText(evt.text || ''), done: true });
+        setCanResume(false);
+        setResumeState(null);
       } else if (evt.type === 'escalation') {
-        copy.push({ kind: 'escalation', text: evt.text || '', done: true });
+        copy.push({ kind: 'escalation', text: deduplicateText(evt.text || ''), done: true });
+        setCanResume(false);
+        setResumeState(null);
       } else if (evt.type === 'error') {
         copy.push({ kind: 'system', text: `ERROR: ${evt.text}`, done: true });
       }
@@ -145,11 +258,11 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0a0a0b] text-[#e8e6e1]">
-      <div className="flex gap-6 px-6 py-8 max-w-[1400px] mx-auto">
+      <div className="flex gap-6 px-6 py-8 max-w-full mx-auto">
         {/* Main debate area */}
         <div className="flex-1 min-w-0">
           <header className="border-b border-[#2a2a2d] pb-6 mb-6">
-            <div className="flex justify-between items-start">
+            <div className="flex justify-between items-start mb-4">
               <div>
                 <h1 className="text-3xl font-bold tracking-tight">
                   <span className="text-[#d4a574]">two</span>
@@ -157,12 +270,41 @@ export default function Home() {
                 </h1>
                 <p className="text-sm text-[#888] mt-1">Marcus (trend) vs. Elena (mean-rev, lead) — they debate, you decide.</p>
               </div>
-              {running && (
-                <button
-                  onClick={() => abortRef.current?.abort()}
-                  className="px-3 py-1 bg-[#d97474] text-[#0a0a0b] font-bold text-sm rounded hover:bg-[#e08585] transition-colors"
+              <div className="flex gap-2">
+                {running && (
+                  <button
+                    onClick={() => abortRef.current?.abort()}
+                    className="px-3 py-1 bg-[#d97474] text-[#0a0a0b] font-bold text-sm rounded hover:bg-[#e08585] transition-colors"
+                  >
+                    STOP
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-4 items-center">
+              <div>
+                <label className="text-xs text-[#888] block mb-1">Model</label>
+                <select
+                  value={model}
+                  onChange={e => setModel(e.target.value)}
+                  disabled={running}
+                  className="bg-[#15151a] border border-[#2a2a2d] rounded px-2 py-1 text-xs focus:outline-none focus:border-[#d4a574] disabled:opacity-50"
                 >
-                  STOP
+                  <option value="claude-opus-4-7">Opus 4.7</option>
+                  <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                </select>
+              </div>
+              {canResume && (
+                <button
+                  onClick={() => {
+                    setInput('Continue...');
+                    submit();
+                  }}
+                  disabled={running}
+                  className="px-3 py-1 bg-[#5ab884] text-[#0a0a0b] font-bold text-xs rounded hover:bg-[#6ac992] disabled:opacity-50 transition-colors"
+                >
+                  RESUME
                 </button>
               )}
             </div>
@@ -178,58 +320,40 @@ export default function Home() {
             )}
 
             {(() => {
-              const systemTurns = turns.filter(t => t.kind === 'system');
-              const elenaTurns = turns.filter(t => t.kind === 'turn' && t.agent === 'Elena');
-              const marcusTurns = turns.filter(t => t.kind === 'turn' && t.agent === 'Marcus');
-              const specialTurns = turns.filter((t): t is Turn & { kind: 'final' | 'escalation' } => t.kind === 'final' || t.kind === 'escalation');
-
               const result: ReactNode[] = [];
-
-              // System messages full-width
-              for (const t of systemTurns) {
-                result.push(
-                  <div key={`system-${result.length}`} className="text-xs text-[#666] italic px-2">
-                    — {t.text} —
-                  </div>
-                );
-              }
-
-              // Debate turns in alternating columns
-              const maxRounds = Math.max(elenaTurns.length, marcusTurns.length);
-              for (let i = 0; i < maxRounds; i++) {
-                result.push(
-                  <div key={`round-${i}`} className="grid grid-cols-2 gap-4">
-                    {marcusTurns[i] && (
-                      <div key={`marcus-${i}`}>
+              for (const turn of turns) {
+                if (turn.kind === 'system') {
+                  result.push(
+                    <div key={`system-${result.length}`} className="text-xs text-[#666] italic px-2">
+                      — {turn.text} —
+                    </div>
+                  );
+                } else if (turn.kind === 'turn') {
+                  const isElena = turn.agent === 'Elena';
+                  const colStart = isElena ? 'col-start-2' : '';
+                  result.push(
+                    <div key={`turn-${result.length}`} className={`grid grid-cols-2 gap-4 ${colStart ? '' : ''}`}>
+                      <div className={isElena ? 'col-start-2' : ''}>
                         <ChatBubble
-                          agent="Marcus"
-                          text={marcusTurns[i].text}
-                          done={marcusTurns[i].done}
-                          round={marcusTurns[i].round}
+                          agent={turn.agent!}
+                          text={turn.text}
+                          done={turn.done}
+                          round={turn.round}
+                          stance={turn.stance}
                         />
                       </div>
-                    )}
-                    {elenaTurns[i] && (
-                      <div key={`elena-${i}`} className="col-start-2">
-                        <ChatBubble
-                          agent="Elena"
-                          text={elenaTurns[i].text}
-                          done={elenaTurns[i].done}
-                          round={elenaTurns[i].round}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
+                    </div>
+                  );
+                } else if (turn.kind === 'summary' && turn.summary) {
+                  result.push(
+                    <RoundSummary key={`summary-${turn.round}`} summary={turn.summary} />
+                  );
+                } else if (turn.kind === 'final' || turn.kind === 'escalation') {
+                  result.push(
+                    <SpecialBubble key={`special-${result.length}`} kind={turn.kind} text={turn.text} />
+                  );
+                }
               }
-
-              // Special messages full-width
-              for (const t of specialTurns) {
-                result.push(
-                  <SpecialBubble key={`special-${result.length}`} kind={t.kind} text={t.text} />
-                );
-              }
-
               return result;
             })()}
           </div>
@@ -260,9 +384,40 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Cost panel */}
-        <div className="w-52 shrink-0">
-          <CostPanel cost={cost} />
+        {/* Right sidebar: Cost panel + Debug */}
+        <div className="w-96 shrink-0 flex flex-col gap-4">
+          <CostPanel cost={cost} sessionTotal={sessionCostTotal} />
+
+          {/* Debug toggle button */}
+          <button
+            onClick={() => setShowDebug(!showDebug)}
+            className="px-3 py-1 bg-[#2a2a2d] text-[#888] hover:text-[#d4a574] text-xs font-bold rounded transition-colors"
+          >
+            {showDebug ? '▼ CLAUDE INPUT' : '▶ CLAUDE INPUT'}
+          </button>
+
+          {/* Debug panel */}
+          {showDebug && debugInfo && (
+            <div className="bg-[#15151a] border border-[#2a2a2d] rounded p-3 text-xs font-mono overflow-hidden flex flex-col max-h-96">
+              <div className="font-bold text-[#d4a574] mb-2">System Prompt (first 500 chars)</div>
+              <div className="bg-[#0a0a0b] p-2 rounded mb-3 text-[#888] overflow-y-auto max-h-32 whitespace-pre-wrap break-words text-[10px]">
+                {debugInfo.systemPrompt.substring(0, 500)}...
+              </div>
+
+              <div className="font-bold text-[#7a9eaf] mb-2">Messages</div>
+              <div className="bg-[#0a0a0b] p-2 rounded overflow-y-auto max-h-40 text-[#888] text-[10px]">
+                {debugInfo.messages.map((msg, i) => (
+                  <div key={i} className="mb-2">
+                    <span className="text-[#d4a574]">[{msg.role.toUpperCase()}]</span>
+                    <div className="ml-2 whitespace-pre-wrap break-words">
+                      {msg.content.substring(0, 200)}
+                      {msg.content.length > 200 ? '...' : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </main>
@@ -274,11 +429,13 @@ function ChatBubble({
   text,
   done,
   round,
+  stance,
 }: {
   agent: 'Elena' | 'Marcus';
   text: string;
   done: boolean;
   round?: number;
+  stance?: Stance;
 }) {
   const isElena = agent === 'Elena';
   const bgColor = isElena ? 'bg-[#1a1a1f]' : 'bg-[#15151a]';
@@ -354,22 +511,82 @@ function SpecialBubble({ kind, text }: { kind: 'final' | 'escalation'; text: str
   );
 }
 
-function CostPanel({ cost }: { cost: Cost }) {
+function RoundSummary({ summary }: { summary: { round: number; elena: Stance; marcus: Stance; consensus: boolean; agreementScore: number } }) {
+  const getStanceColor = (stance: string) => {
+    switch (stance) {
+      case 'bullish': return 'text-[#5ab884]';
+      case 'bearish': return 'text-[#d97474]';
+      case 'neutral': return 'text-[#d4a574]';
+      default: return 'text-[#888]';
+    }
+  };
+
+  const getAgreementLabel = (score: number) => {
+    if (score >= 80) return { text: 'Strong agreement', color: 'text-[#5ab884]' };
+    if (score >= 60) return { text: 'Partial agreement', color: 'text-[#d4a574]' };
+    if (score >= 40) return { text: 'Moderate difference', color: 'text-[#d4a574]' };
+    return { text: 'Significant difference', color: 'text-[#d97474]' };
+  };
+
+  const agreementLabel = getAgreementLabel(summary.agreementScore);
+
   return (
-    <div className="sticky top-8 bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono">
-      <div className="text-xs font-bold text-[#888] mb-3 uppercase">Token Cost</div>
-      <div className="space-y-2">
-        <div>
-          <span className="text-[#888]">Input:</span>
-          <span className="float-right text-[#d8d6d1]">{cost.inputTokens.toLocaleString()}</span>
+    <div className="my-2 bg-[#15151a] border border-[#2a2a2d] rounded p-3">
+      <div className="text-xs font-bold text-[#888] mb-2">Round {summary.round} Status</div>
+      <div className="grid grid-cols-2 gap-4 text-xs">
+        {/* Elena */}
+        <div className="space-y-1">
+          <div className="font-bold text-[#7a9eaf]">Elena</div>
+          <div className={`${getStanceColor(summary.elena.stance)} font-bold`}>{summary.elena.stance}</div>
+          <div className="text-[#888]">Conv: {summary.elena.conviction}/10</div>
+          <div className={summary.elena.agree === 'yes' ? 'text-[#5ab884]' : summary.elena.agree === 'partial' ? 'text-[#d4a574]' : 'text-[#d97474]'}>
+            {summary.elena.agree === 'yes' ? '✓ Agrees' : summary.elena.agree === 'partial' ? '⊕ Partial' : '✗ Disagrees'}
+          </div>
         </div>
-        <div>
-          <span className="text-[#888]">Output:</span>
-          <span className="float-right text-[#d8d6d1]">{cost.outputTokens.toLocaleString()}</span>
+        {/* Marcus */}
+        <div className="space-y-1">
+          <div className="font-bold text-[#d4a574]">Marcus</div>
+          <div className={`${getStanceColor(summary.marcus.stance)} font-bold`}>{summary.marcus.stance}</div>
+          <div className="text-[#888]">Conv: {summary.marcus.conviction}/10</div>
+          <div className={summary.marcus.agree === 'yes' ? 'text-[#5ab884]' : summary.marcus.agree === 'partial' ? 'text-[#d4a574]' : 'text-[#d97474]'}>
+            {summary.marcus.agree === 'yes' ? '✓ Agrees' : summary.marcus.agree === 'partial' ? '⊕ Partial' : '✗ Disagrees'}
+          </div>
         </div>
-        <div className="border-t border-[#2a2a2d] pt-2 mt-2">
-          <span className="text-[#888]">Total:</span>
-          <span className="float-right text-[#d4a574] font-bold">${cost.totalUsd.toFixed(4)}</span>
+      </div>
+      <div className="mt-2 pt-2 border-t border-[#2a2a2d]">
+        <div className={`text-xs font-bold ${agreementLabel.color}`}>
+          {summary.consensus ? '✓ CONSENSUS' : `${agreementLabel.text} (${summary.agreementScore}%)`}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CostPanel({ cost, sessionTotal }: { cost: Cost; sessionTotal: number }) {
+  return (
+    <div className="sticky top-8 bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
+      <div>
+        <div className="text-xs font-bold text-[#888] mb-3 uppercase">Current Debate</div>
+        <div className="space-y-2">
+          <div>
+            <span className="text-[#888]">Input:</span>
+            <span className="float-right text-[#d8d6d1]">{cost.inputTokens.toLocaleString()}</span>
+          </div>
+          <div>
+            <span className="text-[#888]">Output:</span>
+            <span className="float-right text-[#d8d6d1]">{cost.outputTokens.toLocaleString()}</span>
+          </div>
+          <div className="border-t border-[#2a2a2d] pt-2 mt-2">
+            <span className="text-[#888]">Total:</span>
+            <span className="float-right text-[#d4a574] font-bold">${cost.totalUsd.toFixed(4)}</span>
+          </div>
+        </div>
+      </div>
+      <div className="border-t border-[#2a2a2d] pt-4">
+        <div className="text-xs font-bold text-[#888] mb-2 uppercase">Session Total</div>
+        <div>
+          <span className="text-[#888]">All debates:</span>
+          <span className="float-right text-[#5ab884] font-bold">${sessionTotal.toFixed(4)}</span>
         </div>
       </div>
     </div>

@@ -13,10 +13,11 @@ export type AgentChunk =
 
 export async function* streamAgent(
   systemPrompt: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  model: string = 'claude-sonnet-4-6'
 ): AsyncGenerator<AgentChunk, void, void> {
   const stream = client.messages.stream({
-    model: 'claude-sonnet-4-5',
+    model: model as any,
     max_tokens: 1500,
     system: systemPrompt,
     messages,

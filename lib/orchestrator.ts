@@ -5,6 +5,47 @@ import path from 'path';
 
 const MAX_ROUNDS = 10;
 
+export const MODEL_PRICING = {
+  'claude-opus-4-7': { input: 15, output: 75 },
+  'claude-sonnet-4-6': { input: 3, output: 15 },
+  'claude-haiku-4-5-20251001': { input: 0.8, output: 4 },
+};
+
+function getCostUsd(inputTokens: number, outputTokens: number, model: string): number {
+  const pricing = MODEL_PRICING[model as keyof typeof MODEL_PRICING] || MODEL_PRICING['claude-sonnet-4-6'];
+  return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
+}
+
+function saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
+  try {
+    const costFile = path.join(process.cwd(), '.cache', 'debate-costs.json');
+    const dir = path.dirname(costFile);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    let costs: any[] = [];
+    if (fs.existsSync(costFile)) {
+      costs = JSON.parse(fs.readFileSync(costFile, 'utf-8'));
+    }
+
+    const costUsd = getCostUsd(inputTokens, outputTokens, model);
+    costs.push({
+      timestamp: new Date().toISOString(),
+      ticker,
+      rounds,
+      inputTokens,
+      outputTokens,
+      costUsd,
+      model,
+    });
+
+    fs.writeFileSync(costFile, JSON.stringify(costs, null, 2));
+  } catch (e) {
+    console.error('Failed to save debate cost:', e);
+  }
+}
+
 interface StanceBlock {
   stance: 'bullish' | 'bearish' | 'neutral' | 'unknown';
   conviction: number;
@@ -34,35 +75,73 @@ function consensusReached(a: StanceBlock, b: StanceBlock): boolean {
   return a.agree === 'yes' && b.agree === 'yes' && a.stance === b.stance && a.stance !== 'unknown';
 }
 
+function calculateAgreementScore(a: StanceBlock, b: StanceBlock): number {
+  let score = 0;
+  // Same stance: +30 points
+  if (a.stance === b.stance && a.stance !== 'unknown') score += 30;
+  // Both agree: +40 points
+  if (a.agree === 'yes' && b.agree === 'yes') score += 40;
+  // Partial agreement: +15 points
+  if (a.agree === 'partial' && b.agree === 'partial') score += 15;
+  // Similar conviction (within 2): +15 points
+  if (Math.abs(a.conviction - b.conviction) <= 2) score += 15;
+  return Math.min(100, score);
+}
+
 function loadFile(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), rel), 'utf-8');
 }
 
 export interface DebateEvent {
-  type: 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'final' | 'escalation' | 'error';
+  type: 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'round-summary' | 'final' | 'escalation' | 'error' | 'debug';
   agent?: 'Elena' | 'Marcus';
   round?: number;
   text?: string;
   stance?: StanceBlock;
+  summary?: {
+    round: number;
+    elena: StanceBlock;
+    marcus: StanceBlock;
+    consensus: boolean;
+    agreementScore: number; // 0-100: % agreement (higher = more aligned)
+  };
   marketData?: Record<string, TechnicalSnapshot>;
   inputTokens?: number;
   outputTokens?: number;
   totalInputTokens?: number;
   totalOutputTokens?: number;
+  resumeState?: ResumeState;
+  debug?: {
+    systemPrompt: string;
+    messages: Array<{ role: string; content: string }>;
+  };
 }
 
-export async function* runDebate(userRequest: string, signal?: AbortSignal): AsyncGenerator<DebateEvent> {
+export interface ResumeState {
+  transcript: { speaker: 'Elena' | 'Marcus'; text: string }[];
+  round: number;
+  lastElena: StanceBlock | null;
+  lastMarcus: StanceBlock | null;
+}
+
+export async function* runDebate(
+  userRequest: string,
+  signal?: AbortSignal,
+  model: string = 'claude-sonnet-4-6',
+  resumeFrom?: ResumeState
+): AsyncGenerator<DebateEvent> {
   try {
     const cumulative = { input: 0, output: 0 };
+    const tickers = extractTickers(userRequest);
+
     // 1. Load personas + profile
     const elenaPersona = loadFile('agents/agent-meanrev.md');
     const marcusPersona = loadFile('agents/agent-trend.md');
     const userProfile = loadFile('profile/user-profile.md');
 
     // 2. Fetch market data for any tickers in the request
-    const tickers = extractTickers(userRequest);
     const marketData: Record<string, TechnicalSnapshot> = {};
-    if (tickers.length > 0) {
+    if (tickers.length > 0 && !resumeFrom) {
       yield { type: 'system', text: `Fetching market data for: ${tickers.join(', ')}...` };
       for (const t of tickers) {
         try {
@@ -72,7 +151,11 @@ export async function* runDebate(userRequest: string, signal?: AbortSignal): Asy
         }
       }
     }
-    yield { type: 'system', text: 'Market data ready. Starting debate.', marketData };
+    if (!resumeFrom) {
+      yield { type: 'system', text: 'Market data ready. Starting debate.', marketData };
+    } else {
+      yield { type: 'system', text: 'Resuming debate from last position.' };
+    }
 
     // 3. Build the shared context block
     const marketBlock = Object.keys(marketData).length
@@ -91,7 +174,10 @@ ${marketBlock}
 
     // 4. Debate state — each agent sees the conversation from their own perspective
     // We maintain a single shared transcript and rebuild per-agent message arrays each turn.
-    const transcript: { speaker: 'Elena' | 'Marcus'; text: string }[] = [];
+    const transcript: { speaker: 'Elena' | 'Marcus'; text: string }[] = resumeFrom?.transcript || [];
+    let lastElena: StanceBlock | null = resumeFrom?.lastElena || null;
+    let lastMarcus: StanceBlock | null = resumeFrom?.lastMarcus || null;
+    let startRound = resumeFrom?.round || 1;
 
     const buildMessages = (forAgent: 'Elena' | 'Marcus'): ChatMessage[] => {
       const msgs: ChatMessage[] = [{ role: 'user', content: sharedContext }];
@@ -109,16 +195,27 @@ ${marketBlock}
       return msgs;
     };
 
-    let lastElena: StanceBlock | null = null;
-    let lastMarcus: StanceBlock | null = null;
+    let agreementHistory: { elena: StanceBlock; marcus: StanceBlock }[] = [];
 
-    for (let round = 1; round <= MAX_ROUNDS; round++) {
+    for (let round = startRound; round <= MAX_ROUNDS; round++) {
       // --- Elena's turn (lead opens) ---
       yield { type: 'turn-start', agent: 'Elena', round };
       const elenaMessages = buildMessages('Elena');
-      const elenaSystem = `${elenaPersona}\n\n## CONTEXT FOR THIS DEBATE\nYou are debating with Marcus Vance (trend/momentum trader). This is round ${round} of max ${MAX_ROUNDS}. ${round === 1 ? 'Open with your initial analysis based on the market data.' : 'Respond to Marcus\'s last message specifically.'}`;
+      const elenaSystem = `${elenaPersona}\n\n## CONTEXT FOR THIS DEBATE\nYou are debating with Marcus Vance (trend/momentum trader). This is round ${round} of max ${MAX_ROUNDS}. ${round === startRound ? 'Open with your initial analysis based on the market data.' : 'Respond to Marcus\'s last message specifically.'}`;
+
+      // Emit debug info so user can see what Claude receives
+      yield {
+        type: 'debug',
+        agent: 'Elena',
+        round,
+        debug: {
+          systemPrompt: elenaSystem,
+          messages: elenaMessages,
+        },
+      };
+
       let elenaText = '';
-      const elenaGen = streamAgent(elenaSystem, elenaMessages);
+      const elenaGen = streamAgent(elenaSystem, elenaMessages, model);
       for await (const chunk of elenaGen) {
         if (signal?.aborted) return;
         if (chunk.kind === 'text') {
@@ -145,8 +242,20 @@ ${marketBlock}
       yield { type: 'turn-start', agent: 'Marcus', round };
       const marcusMessages = buildMessages('Marcus');
       const marcusSystem = `${marcusPersona}\n\n## CONTEXT FOR THIS DEBATE\nYou are debating with Elena Sokolov (mean-reversion trader, the lead). This is round ${round} of max ${MAX_ROUNDS}. Respond to her last message specifically.`;
+
+      // Emit debug info so user can see what Claude receives
+      yield {
+        type: 'debug',
+        agent: 'Marcus',
+        round,
+        debug: {
+          systemPrompt: marcusSystem,
+          messages: marcusMessages,
+        },
+      };
+
       let marcusText = '';
-      const marcusGen = streamAgent(marcusSystem, marcusMessages);
+      const marcusGen = streamAgent(marcusSystem, marcusMessages, model);
       for await (const chunk of marcusGen) {
         if (signal?.aborted) return;
         if (chunk.kind === 'text') {
@@ -161,12 +270,29 @@ ${marketBlock}
       const marcusStance = parseStance(marcusText);
       transcript.push({ speaker: 'Marcus', text: marcusText });
       lastMarcus = marcusStance;
-      yield { type: 'turn-end', agent: 'Marcus', round, stance: marcusStance };
+
+      const resumeState: ResumeState = { transcript, round: round + 1, lastElena, lastMarcus };
+      yield { type: 'turn-end', agent: 'Marcus', round, stance: marcusStance, resumeState };
+
+      // --- Round summary (for UI) ---
+      agreementHistory.push({ elena: lastElena!, marcus: lastMarcus });
+      const agreementScore = calculateAgreementScore(lastElena!, lastMarcus);
+      yield {
+        type: 'round-summary',
+        round,
+        summary: {
+          round,
+          elena: lastElena!,
+          marcus: lastMarcus,
+          consensus: consensusReached(lastElena!, lastMarcus),
+          agreementScore,
+        },
+      };
 
       // --- Consensus check ---
       if (consensusReached(lastElena, lastMarcus)) {
         // Ask Elena to write the FINAL recommendation
-        yield { type: 'system', text: 'Consensus reached. Elena will write the final recommendation.' };
+        yield { type: 'system', text: '✓ Consensus reached. Elena will write the final recommendation.' };
         yield { type: 'turn-start', agent: 'Elena', round: round + 1 };
         const finalMessages = buildMessages('Elena');
         finalMessages.push({
@@ -174,7 +300,7 @@ ${marketBlock}
           content: 'Consensus is reached. Now write the FINAL RECOMMENDATION block as specified in your instructions — Action, Direction, Conviction, Entry zone, Stop, Target(s), Position sizing note, Key risks, What invalidates the thesis.',
         });
         let finalText = '';
-        const finalGen = streamAgent(elenaSystem, finalMessages);
+        const finalGen = streamAgent(elenaSystem, finalMessages, model);
         for await (const chunk of finalGen) {
           if (signal?.aborted) return;
           if (chunk.kind === 'text') {
@@ -186,6 +312,7 @@ ${marketBlock}
             yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
           }
         }
+        saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
         yield { type: 'final', text: finalText };
         return;
       }
@@ -205,7 +332,7 @@ ${marketBlock}
       },
     ];
     let escText = '';
-    const escGen = streamAgent(loadFile('agents/agent-meanrev.md'), escalationMessages);
+    const escGen = streamAgent(loadFile('agents/agent-meanrev.md'), escalationMessages, model);
     for await (const chunk of escGen) {
       if (signal?.aborted) return;
       if (chunk.kind === 'text') {
@@ -217,6 +344,7 @@ ${marketBlock}
         yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
       }
     }
+    saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
     yield { type: 'escalation', text: escText };
 
   } catch (e) {

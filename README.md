@@ -6,12 +6,17 @@ Two opinionated trading agents debate your setup in real-time until they reach c
 - **Marcus Vance** (challenger) — trend, momentum, react not predict
 
 **Live UI:**
+- **Model selector** — Choose Claude Opus (best reasoning), Sonnet (balanced), or Haiku (fast + cheap) before each debate
 - Chat-style alternating bubbles (Marcus left, Elena right)
-- Real-time cost panel showing token spend (in dollars)
+- **Round Summary Cards** — See stance, conviction, and agreement % after each round
+- **Cost panel** with two sections:
+  - **Current Debate** — tokens and cost in real-time
+  - **Session Total** — cumulative cost across all debates today
 - Markdown rendering (no raw tags visible)
 - Smart scroll that doesn't yank you away while reading
-- Stop button to halt mid-debate
+- **Stop button** to halt mid-debate, **Resume button** to pick up where you left off (full context preserved)
 - Final recommendation or escalation (needs you to decide)
+- **Optimized for clarity** — Track debate progress at a glance instead of reading walls of text
 
 ---
 
@@ -75,10 +80,13 @@ Consensus reached?
 - **Alternating:** As they respond to each other
 
 ### Cost Panel (right sidebar)
-- **Input tokens:** tokens fed to Claude
-- **Output tokens:** tokens Claude generated
-- **Total cost:** `(input × $3 + output × $15) / 1M` (Sonnet 4.5 pricing)
-- Updates in real-time as debate unfolds
+- **Current Debate:** Input/output tokens and cost (updates in real-time)
+- **Session Total:** Cumulative cost across all debates in your session
+- **Model-specific pricing:**
+  - Opus: $15/$75 per 1M tokens (best reasoning, slowest)
+  - Sonnet: $3/$15 per 1M tokens (balanced, recommended)
+  - Haiku: $0.80/$4 per 1M tokens (fastest, cheapest)
+- Costs are saved to `.cache/debate-costs.json` after each debate completes
 
 ### Smart Scroll
 - If you scroll up to read Elena's previous response, the page **stays put**
@@ -157,6 +165,8 @@ Push to GitHub → Vercel auto-deploys.
 
 For technical details, see **[CLAUDE.md](./CLAUDE.md)** (developer reference).
 
+For design rationale on debate efficiency, see **[DEBATE_STRUCTURE.md](./DEBATE_STRUCTURE.md)** — explains how agents avoid repetition and accelerate consensus.
+
 ---
 
 ## Notes & Limitations
@@ -167,7 +177,11 @@ For technical details, see **[CLAUDE.md](./CLAUDE.md)** (developer reference).
 - **Daily data only:** Yahoo Finance provides daily OHLCV candles. Intraday requires Polygon/Alpaca.
 - **No persistence:** Each session is fresh (no history storage).
 - **Rate limits:** Anthropic has per-minute and monthly quotas. Monitor your [Anthropic dashboard](https://console.anthropic.com/account/usage).
-- **Cost:** Roughly $0.25–$0.50 per debate (40–60K tokens per 10 rounds).
+- **Market data caching:** 1-hour TTL. Reuse cached data to reduce API calls. Second debate on same ticker = instant (no Yahoo Finance call). Cached data is used as fallback if API times out.
+- **Cost:** Varies by model:
+  - Haiku: ~$0.02–$0.05 per debate (fastest, cheapest)
+  - Sonnet: ~$0.10–$0.25 per debate (balanced, recommended)
+  - Opus: ~$0.50–$1.50 per debate (best reasoning, slowest)
 
 ---
 
@@ -175,10 +189,11 @@ For technical details, see **[CLAUDE.md](./CLAUDE.md)** (developer reference).
 
 - **Frontend:** Next.js 15 (App Router), React 19, Tailwind CSS
 - **Backend:** Next.js API Routes (Node.js)
-- **AI:** Anthropic Claude (Sonnet 4.5)
-- **Market Data:** Yahoo Finance (free, no key)
+- **AI:** Anthropic Claude (Opus, Sonnet, or Haiku — user selects per debate)
+- **Market Data:** Yahoo Finance REST API (free, no key, 25-second timeout protection, 1-hour caching)
 - **Streaming:** Server-Sent Events (SSE)
 - **Hosting:** Vercel
+- **Cost persistence:** JSON file (`.cache/debate-costs.json`)
 
 ---
 
@@ -196,10 +211,22 @@ npx tsc --noEmit
 ```
 
 **Agents give wrong answers?**
-Edit their personas in `agents/*.md` — they're just Markdown files.
+- Edit their personas in `agents/*.md` — they're just Markdown files.
+- Check they're receiving market data: Look for "CURRENT MARKET DATA" section in the UI or debug panel.
+- If market data is missing/zero, make sure tickers are extracted correctly (`$NVDA` or `NVDA 2-5 letters).
+- Clear cache if data seems stale: `rm -rf .cache/`
 
 **Cost panel stuck at $0?**
-Make sure debate is running. Cost updates as agents speak. Check the Network tab in DevTools to see if usage events are streaming.
+- Make sure debate is running. Cost updates as agents speak.
+- Check the Network tab in DevTools to see if usage events are streaming.
+- Costs are persisted to `.cache/debate-costs.json` — check that file exists after a debate completes.
+- Session total loads from that file on page mount.
+
+**Market data fetch timing out?**
+- Yahoo Finance requests have a 25-second timeout. If this happens frequently, check your internet connection.
+- The system gracefully falls back to cached data (even if stale) if the fetch times out.
+- Cached data is stored in `.cache/market-data-cache.json` (1-hour TTL).
+- To clear cache and force fresh fetches: `rm -rf .cache/`
 
 ---
 

@@ -1,6 +1,66 @@
-import * as yf from 'yahoo-finance2';
+import * as fs from 'fs';
+import * as path from 'path';
 
-const yahooFinance = yf as any;
+const CACHE_DIR = path.join(process.cwd(), '.cache');
+const CACHE_FILE = path.join(CACHE_DIR, 'market-data-cache.json');
+const CACHE_TTL_MS = 3600000; // 1 hour
+
+interface CacheEntry {
+  symbol: string;
+  data: TechnicalSnapshot;
+  fetchedAt: number;
+}
+
+interface CacheIndex {
+  [symbol: string]: CacheEntry;
+}
+
+function ensureCacheDir() {
+  if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+  }
+}
+
+function loadCache(): CacheIndex {
+  try {
+    if (!fs.existsSync(CACHE_FILE)) return {};
+    const content = fs.readFileSync(CACHE_FILE, 'utf-8');
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+function saveCache(cache: CacheIndex) {
+  try {
+    ensureCacheDir();
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(cache, null, 2));
+  } catch (e) {
+    // Silently fail if we can't write cache
+  }
+}
+
+function getCachedData(symbol: string): TechnicalSnapshot | null {
+  const cache = loadCache();
+  const entry = cache[symbol.toUpperCase()];
+  if (!entry) return null;
+
+  const age = Date.now() - entry.fetchedAt;
+  if (age < CACHE_TTL_MS) {
+    return entry.data; // Cache is fresh (< 1 hour)
+  }
+  return null;
+}
+
+function updateCache(symbol: string, data: TechnicalSnapshot) {
+  const cache = loadCache();
+  cache[symbol.toUpperCase()] = {
+    symbol: symbol.toUpperCase(),
+    data,
+    fetchedAt: Date.now(),
+  };
+  saveCache(cache);
+}
 
 export interface TechnicalSnapshot {
   symbol: string;
@@ -77,46 +137,90 @@ const atr = (highs: number[], lows: number[], closes: number[], period = 14): nu
   return sma(trs, period);
 };
 
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  const timeout = new Promise<T>((_, reject) =>
+    setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms)
+  );
+  return Promise.race([promise, timeout]);
+}
+
 export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSnapshot> {
+  // Check cache first
+  const cached = getCachedData(symbol);
+  if (cached) {
+    return cached;
+  }
+
   const end = new Date();
   const start = new Date();
   start.setFullYear(end.getFullYear() - 1);
 
-  const result = (await yahooFinance.chart(symbol, {
-    period1: start,
-    period2: end,
-    interval: '1d',
-  })) as any;
+  let result: any;
+  try {
+    const period1 = Math.floor(start.getTime() / 1000);
+    const period2 = Math.floor(end.getTime() / 1000);
+    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${period1}&period2=${period2}`;
 
-  const quotes = result.quotes.filter((q: any) => q.close != null);
-  const closes = quotes.map((q: any) => q.close as number);
-  const highs = quotes.map((q: any) => q.high as number);
-  const lows = quotes.map((q: any) => q.low as number);
-  const volumes = quotes.map((q: any) => q.volume as number);
+    const response = await withTimeout(fetch(chartUrl), 25000);
 
-  const price = closes[closes.length - 1];
-  const prev = closes[closes.length - 2];
-  const changePct = ((price - prev) / prev) * 100;
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
 
-  const e20 = ema(closes, 20);
+    const data = await response.json();
+    result = data.chart.result?.[0];
+
+    if (!result || !result.timestamp) {
+      throw new Error('No data returned from Yahoo Finance');
+    }
+  } catch (e) {
+    // API call failed - try to use stale cache as fallback
+    const cache = loadCache();
+    const staleEntry = cache[symbol.toUpperCase()];
+    if (staleEntry) {
+      return staleEntry.data;
+    }
+    throw new Error(`Failed to fetch ${symbol} and no cached data available: ${(e as Error).message}`);
+  }
+
+  // Parse the new API format
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators.quote[0] || {};
+  const closes = quote.close || [];
+  const highs = quote.high || [];
+  const lows = quote.low || [];
+  const volumes = quote.volume || [];
+
+  // Filter out nulls
+  const validIndices = closes.map((_: any, i: number) => i).filter((i: number) => closes[i] != null);
+  const filteredCloses = validIndices.map((i: number) => closes[i]);
+  const filteredHighs = validIndices.map((i: number) => highs[i]);
+  const filteredLows = validIndices.map((i: number) => lows[i]);
+  const filteredVolumes = validIndices.map((i: number) => volumes[i]);
+
+  const price = filteredCloses[filteredCloses.length - 1];
+  const prev = filteredCloses[filteredCloses.length - 2] || price;
+  const changePct = prev ? ((price - prev) / prev) * 100 : 0;
+
+  const e20 = ema(filteredCloses, 20);
   const ema20 = e20[e20.length - 1];
-  const sma50 = sma(closes, 50);
-  const sma200 = sma(closes, 200);
-  const rsi14 = rsi(closes);
-  const macdVals = macd(closes);
+  const sma50 = sma(filteredCloses, 50);
+  const sma200 = sma(filteredCloses, 200);
+  const rsi14 = rsi(filteredCloses);
+  const macdVals = macd(filteredCloses);
 
-  const last20 = closes.slice(-20);
+  const last20 = filteredCloses.slice(-20);
   const mid = last20.reduce((a: number, b: number) => a + b, 0) / 20;
   const sd = stddev(last20);
   const upper = mid + 2 * sd;
   const lower = mid - 2 * sd;
   const pctB = (price - lower) / (upper - lower);
 
-  const atr14 = atr(highs, lows, closes);
+  const atr14 = atr(filteredHighs, filteredLows, filteredCloses);
 
-  const high52w = Math.max(...closes);
-  const low52w = Math.min(...closes);
-  const avgVolume = sma(volumes, 20);
+  const high52w = Math.max(...filteredCloses);
+  const low52w = Math.min(...filteredCloses);
+  const avgVolume = sma(filteredVolumes, 20);
 
   // Regime & structure
   let regime = 'mixed';
@@ -135,16 +239,23 @@ export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSna
   if (secondHalfHigh > firstHalfHigh && secondHalfLow > firstHalfLow) trendStructure = 'higher highs, higher lows (uptrend)';
   else if (secondHalfHigh < firstHalfHigh && secondHalfLow < firstHalfLow) trendStructure = 'lower highs, lower lows (downtrend)';
 
-  const recentCandles = quotes.slice(-10).map((q: any) => ({
-    date: (q.date instanceof Date ? q.date : new Date(q.date)).toISOString().split('T')[0],
-    o: q.open as number,
-    h: q.high as number,
-    l: q.low as number,
-    c: q.close as number,
-    v: q.volume as number,
-  }));
+  // Build candles from the filtered data
+  const opens = result.indicators.quote[0]?.open || [];
+  const filteredOpens = validIndices.map((i: number) => opens[i]);
+  const recentCandles = filteredCloses.slice(-10).map((close: number, idx: number) => {
+    const dataIdx = filteredCloses.length - 10 + idx;
+    const timestamp = timestamps[validIndices[dataIdx]];
+    return {
+      date: new Date(timestamp * 1000).toISOString().split('T')[0],
+      o: filteredOpens[dataIdx] as number,
+      h: filteredHighs[dataIdx] as number,
+      l: filteredLows[dataIdx] as number,
+      c: close as number,
+      v: filteredVolumes[dataIdx] as number,
+    };
+  });
 
-  return {
+  const snapshot: TechnicalSnapshot = {
     symbol: symbol.toUpperCase(),
     asOf: new Date().toISOString().split('T')[0],
     price: +price.toFixed(2),
@@ -164,6 +275,11 @@ export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSna
     regime,
     trendStructure,
   };
+
+  // Update cache with fresh data
+  updateCache(symbol, snapshot);
+
+  return snapshot;
 }
 
 // Extract tickers from a free-text request: $TICKER or 1-5 uppercase letters
