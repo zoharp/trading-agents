@@ -1,0 +1,71 @@
+@echo off
+setlocal enabledelayedexpansion
+
+REM ============================================================
+REM two.desk - Dev Server Launcher
+REM Kills existing process, starts Next.js dev server + opens browser
+REM ============================================================
+
+title two.desk - Dev Server
+
+echo.
+echo ============================================================
+echo  two.desk - Development Server
+echo ============================================================
+echo.
+
+set FRONTEND_PORT=3000
+set FRONTEND_URL=http://localhost:%FRONTEND_PORT%
+
+REM Change to project root
+cd /d "%~dp0"
+
+REM Kill any existing process on port 3000
+echo [*] Cleaning up existing processes on port %FRONTEND_PORT%...
+powershell -NoProfile -Command "Get-Process -Id (Get-NetTCPConnection -LocalPort %FRONTEND_PORT% -State Listen -ErrorAction SilentlyContinue).OwningProcess -ErrorAction SilentlyContinue | Stop-Process -Force" >nul 2>&1
+
+REM Wait a moment for cleanup
+ping -n 3 127.0.0.1 >nul
+
+REM Start Next.js dev server
+echo [1/1] Starting Next.js dev server on port %FRONTEND_PORT%...
+start "two.desk" cmd /k "npm run dev"
+
+REM Wait for server to start
+echo.
+echo [*] Waiting for dev server to start...
+set "max_retries=30"
+set "retry_count=0"
+
+:check_server
+if %retry_count% geq %max_retries% (
+    echo [!] Dev server not ready after %max_retries% retries
+    goto open_browser
+)
+ping -n 2 127.0.0.1 >nul
+curl -s %FRONTEND_URL% >nul 2>&1
+if errorlevel 1 (
+    set /a retry_count+=1
+    echo [*] Waiting... (!retry_count!/%max_retries%)
+    goto check_server
+)
+echo [OK] Dev server ready at %FRONTEND_URL%
+
+ping -n 6 127.0.0.1 >nul
+
+:open_browser
+echo.
+echo [*] Opening browser to %FRONTEND_URL%...
+start %FRONTEND_URL%
+
+echo.
+echo ============================================================
+echo [OK] two.desk Started
+echo ============================================================
+echo.
+echo Frontend:  %FRONTEND_URL%
+echo.
+echo Press Ctrl+C in the server window to stop.
+echo ============================================================
+echo.
+pause
