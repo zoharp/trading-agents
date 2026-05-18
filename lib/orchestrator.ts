@@ -92,6 +92,64 @@ function loadFile(rel: string): string {
   return fs.readFileSync(path.join(process.cwd(), rel), 'utf-8');
 }
 
+function formatSnapshot(s: TechnicalSnapshot): string {
+  const lines: string[] = [];
+  const n = (v: number | undefined, decimals = 2) => v !== undefined ? v.toFixed(decimals) : 'n/a';
+
+  lines.push(`### ${s.symbol} — as of ${s.asOf}`);
+  lines.push(`Price: $${n(s.price)} (${s.changePct >= 0 ? '+' : ''}${n(s.changePct)}%) | 52w: $${n(s.low52w)} – $${n(s.high52w)}`);
+  lines.push(`Volume: ${s.volume?.toLocaleString() ?? 'n/a'} (avg 20d: ${s.avgVolume?.toLocaleString() ?? 'n/a'})`);
+
+  lines.push(`\nTechnical:`);
+  lines.push(`  RSI(14): ${n(s.rsi14, 1)} | MACD hist: ${s.macd.hist >= 0 ? '+' : ''}${n(s.macd.hist, 3)} (macd: ${n(s.macd.macd, 3)}, signal: ${n(s.macd.signal, 3)})`);
+  lines.push(`  EMA20: $${n(s.ema20)} | SMA50: $${n(s.sma50)} | SMA200: $${n(s.sma200)}`);
+  lines.push(`  BB: upper $${n(s.bollinger.upper)} / mid $${n(s.bollinger.mid)} / lower $${n(s.bollinger.lower)} (${(s.bollinger.pctB * 100).toFixed(0)}%B)`);
+  lines.push(`  ATR(14): $${n(s.atr14)} | OBV trend: ${s.obvTrend} | CMF(20): ${n(s.cmf, 3)}`);
+  lines.push(`  Accumulation score: ${s.accumulationScore}/100`);
+  lines.push(`  Regime: ${s.regime}`);
+  lines.push(`  Structure: ${s.trendStructure}`);
+
+  if (s.earningsDate) {
+    lines.push(`\nEarnings: ${s.earningsDate}${s.earningsDaysAway !== undefined ? ` (${s.earningsDaysAway}d away)` : ''}${s.earningsSoon ? ' ⚠️ SOON' : ''}`);
+  }
+
+  const hasAnalyst = s.analystTarget || s.peRatio || s.cashDebtRatio !== undefined;
+  if (hasAnalyst) {
+    lines.push(`\nFundamentals:`);
+    if (s.analystTarget) lines.push(`  Analyst target: $${n(s.analystTarget)} (${s.analystRecommendation ?? '?'}, n=${s.analystCount ?? '?'})`);
+    if (s.peRatio) lines.push(`  P/E: ${n(s.peRatio, 1)}`);
+    if (s.cashDebtRatio !== undefined) lines.push(`  Cash/Debt: ${n(s.cashDebtRatio)}x (${s.cashDebtLabel ?? ''})`);
+    if (s.sector) lines.push(`  Sector: ${s.sector}`);
+  }
+
+  const hasSentiment = s.putCallRatio !== undefined || s.shortPct !== undefined || s.insiderSignal || s.googleTrendsChange !== undefined;
+  if (hasSentiment) {
+    lines.push(`\nSentiment:`);
+    if (s.putCallRatio !== undefined) lines.push(`  Put/Call: ${n(s.putCallRatio, 2)} (${s.putCallLabel ?? ''})`);
+    if (s.shortPct !== undefined) lines.push(`  Short interest: ${n(s.shortPct, 1)}% (${s.shortLabel ?? ''})`);
+    if (s.insiderSignal) lines.push(`  Insider (45d): ${s.insiderSignal}${s.insiderDetail ? ` — ${s.insiderDetail}` : ''}`);
+    if (s.googleTrendsChange !== undefined) lines.push(`  Google Trends: ${s.googleTrendsChange >= 0 ? '+' : ''}${n(s.googleTrendsChange, 1)}% (${s.googleTrendsLabel ?? ''})`);
+  }
+
+  const hasPerf = s.stockReturn30d !== undefined || s.alphaVsSpy !== undefined;
+  if (hasPerf) {
+    lines.push(`\nPerformance:`);
+    if (s.stockReturn30d !== undefined) lines.push(`  30d return: ${s.stockReturn30d >= 0 ? '+' : ''}${n(s.stockReturn30d, 2)}%`);
+    if (s.alphaVsSpy !== undefined) lines.push(`  Alpha vs SPY: ${s.alphaVsSpy >= 0 ? '+' : ''}${n(s.alphaVsSpy, 2)}%`);
+    if (s.industryAlpha !== undefined) lines.push(`  Alpha vs ${s.industryEtfName ?? 'sector'}: ${s.industryAlpha >= 0 ? '+' : ''}${n(s.industryAlpha, 2)}%`);
+    if (s.trendDirection) lines.push(`  18m trend: ${s.trendDirection}`);
+  }
+
+  if (s.support20d || s.resistance20d) {
+    lines.push(`\nLevels:`);
+    if (s.support20d) lines.push(`  Support 20d: $${n(s.support20d)}`);
+    if (s.safeStrike) lines.push(`  Safe strike: $${n(s.safeStrike)}`);
+    if (s.resistance20d) lines.push(`  Resistance 20d: $${n(s.resistance20d)}`);
+  }
+
+  return lines.join('\n');
+}
+
 export interface DebateEvent {
   type: 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'round-summary' | 'final' | 'escalation' | 'error' | 'debug';
   agent?: 'Elena' | 'Marcus';
@@ -159,7 +217,7 @@ export async function* runDebate(
 
     // 3. Build the shared context block
     const marketBlock = Object.keys(marketData).length
-      ? `## CURRENT MARKET DATA\n\`\`\`json\n${JSON.stringify(marketData, null, 2)}\n\`\`\``
+      ? Object.entries(marketData).map(([, s]) => formatSnapshot(s)).join('\n\n')
       : '## CURRENT MARKET DATA\n(No specific tickers detected in the request.)';
 
     const sharedContext = `
@@ -240,6 +298,8 @@ ${marketBlock}
         if (chunk.kind === 'text') {
           elenaText += chunk.text;
           yield { type: 'token', agent: 'Elena', text: chunk.text };
+        } else if (chunk.kind === 'retry') {
+          yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
         } else {
           cumulative.input += chunk.inputTokens;
           cumulative.output += chunk.outputTokens;
@@ -280,6 +340,8 @@ ${marketBlock}
         if (chunk.kind === 'text') {
           marcusText += chunk.text;
           yield { type: 'token', agent: 'Marcus', text: chunk.text };
+        } else if (chunk.kind === 'retry') {
+          yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
         } else {
           cumulative.input += chunk.inputTokens;
           cumulative.output += chunk.outputTokens;
@@ -308,6 +370,17 @@ ${marketBlock}
         },
       };
 
+      // --- Blocked check: both agents have conviction 0 — missing data, can't proceed ---
+      if (lastElena.conviction === 0 && lastMarcus.conviction === 0) {
+        yield { type: 'system', text: 'Both agents are blocked — no ticker or critical data missing. Stopping debate.' };
+        saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
+        yield {
+          type: 'escalation',
+          text: '## ESCALATION — MISSING DATA\n\nBoth agents cannot proceed without a specific ticker and current price.\n\n**What they need:**\n- Which instrument? (e.g. TSLA, SPY, NVDA)\n- Current price or price level you\'re analyzing\n- Timeframe (daily, weekly?)\n\nPlease resubmit with a ticker symbol.',
+        };
+        return;
+      }
+
       // --- Consensus check ---
       if (consensusReached(lastElena, lastMarcus)) {
         // Ask Elena to write the FINAL recommendation
@@ -325,6 +398,8 @@ ${marketBlock}
           if (chunk.kind === 'text') {
             finalText += chunk.text;
             yield { type: 'token', agent: 'Elena', text: chunk.text };
+          } else if (chunk.kind === 'retry') {
+            yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
           } else {
             cumulative.input += chunk.inputTokens;
             cumulative.output += chunk.outputTokens;
@@ -357,6 +432,8 @@ ${marketBlock}
       if (chunk.kind === 'text') {
         escText += chunk.text;
         yield { type: 'token', agent: 'Elena', text: chunk.text };
+      } else if (chunk.kind === 'retry') {
+        yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
       } else {
         cumulative.input += chunk.inputTokens;
         cumulative.output += chunk.outputTokens;
@@ -366,7 +443,16 @@ ${marketBlock}
     saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
     yield { type: 'escalation', text: escText };
 
-  } catch (e) {
-    yield { type: 'error', text: (e as Error).message };
+  } catch (e: any) {
+    let msg: string = e?.message || 'Unknown error';
+    // Anthropic errors sometimes serialize as JSON strings — extract the human message
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed?.error?.message) msg = `API error: ${parsed.error.message}`;
+      else if (parsed?.message) msg = parsed.message;
+    } catch {}
+    // Also handle structured error objects
+    if (e?.error?.message) msg = `API error: ${e.error.message}`;
+    yield { type: 'error', text: msg };
   }
 }

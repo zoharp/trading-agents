@@ -199,9 +199,9 @@ The response is SSE (text/event-stream). Each line is a JSON event:
 
 | File | Purpose |
 |------|---------|
-| `lib/claude.ts` | Streams agent responses from Claude API. Yields `AgentChunk` union (text or usage). Supports all Claude models. |
-| `lib/orchestrator.ts` | Debate loop: Elena & Marcus take turns, parse stances, track tokens, detect consensus. Saves costs to JSON. Respects `AbortSignal` for early stopping. |
-| `lib/market-data.ts` | **NEW:** Fetches 1-year daily OHLCV from Supabase `prices` table (stock-predictor DB), computes indicators (EMA, RSI, MACD, Bollinger Bands, ATR). 25s timeout, 1-hour caching. `getSupabasePrices()` handles pagination. |
+| `lib/claude.ts` | Streams agent responses from Claude API. Yields `AgentChunk` union (text, usage, retry). Auto-retries on `overloaded_error` up to 3× (3s/6s/9s delays). Yields `retry` chunk so UI can show feedback. |
+| `lib/orchestrator.ts` | Debate loop: Elena & Marcus take turns, parse stances, track tokens, detect consensus. `formatSnapshot()` converts `TechnicalSnapshot` to compact text (~150 tokens vs ~630 for JSON). Early exit when both agents have conviction 0 (missing ticker). Saves costs to JSON. Respects `AbortSignal`. |
+| `lib/market-data.ts` | Fetches OHLCV from Supabase `prices` table (always live). Computes EMA/RSI/MACD/BB/ATR/OBV/CMF/accumulation score. Also queries `slow_data` table in parallel for: earnings date, analyst target/consensus/P-E, cash/debt ratio, put/call ratio, short interest, insider activity, Google Trends, alpha vs SPY/sector, support/resistance. |
 | `app/page.tsx` | Main UI: model selector, alternating chat-style bubbles, round summaries, cost panel (current + session total), pause/resume, stop button. |
 | `app/api/debate/route.ts` | SSE endpoint: accepts user request + model choice, calls `runDebate()`, streams events to client. Supports resume state. |
 | `app/api/debate-costs/route.ts` | GET endpoint: returns JSON array of all debate costs from `.cache/debate-costs.json`. Used to calculate session totals. |
@@ -213,26 +213,38 @@ The response is SSE (text/event-stream). Each line is a JSON event:
 
 ## UI Features
 
-- **Model selector:** Choose from Claude Opus, Sonnet, or Haiku before each debate (different cost/speed tradeoffs)
+- **Model selector:** Choose from Claude Opus, Sonnet, or Haiku before each debate. **Default: Haiku** (fastest/cheapest).
+- **User query card:** Gold card at the top of the feed showing your question once the debate starts
 - **Chat-style layout:** Messages alternate left (Marcus) / right (Elena) in a scrollable feed
 - **System messages:** Full-width italic dividers (market data fetching, consensus detected, etc.)
 - **Debate bubbles:** Each agent's turn is a styled card with name, round, and live-rendered markdown
+- **Streaming rendering:** Plain `<pre>` while tokens arrive (avoids partial-markdown glitches); switches to ReactMarkdown when turn is `done`
 - **Round Summary Card:** After each round, displays side-by-side stance cards showing:
   - Each agent's stance (bullish/bearish/neutral) and conviction level (1-10)
   - Agreement status (✓ Agrees / ⊕ Partial / ✗ Disagrees)
   - **Agreement Score** (0-100%) showing how aligned they are
   - Color-coded: green for strong agreement, orange for partial, red for disagreement
-- **Streaming text:** Content appears as agents think (progressive text chunks)
 - **Cursor animation:** Pulsing `▌` cursor while agent is speaking
 - **Stop button:** Red "STOP" button visible during debate; clicking aborts the stream
 - **Resume button:** Green "RESUME" button appears after stopping; preserves full debate context (transcript, stances, round number)
-- **Cost panel:** Sticky right sidebar showing two sections:
-  - **Current Debate:** Input/output tokens and USD cost (updates in real-time)
-  - **Session Total:** Cumulative cost across all debates in this session
+- **Number colorization:** All numeric values in agent messages render in soft cyan (`#7ec4cf`) for quick scanning — in both streaming and final rendered views.
+- **Market data panel:** Right sidebar, sectioned: Earnings, Analyst/Fundamentals, Sentiment, Performance, Support/Resistance, Technical, Accumulation. Sections only render when data is present.
+  - Price, % change, 52-week range bar
+  - Earnings date + days away (red when soon)
+  - Analyst target, consensus, count, P/E, cash/debt ratio
+  - Put/call ratio, short interest, insider signal (45d), Google Trends
+  - Alpha vs SPY, alpha vs sector ETF, 18m trend direction
+  - Support/resistance/safe-strike levels
+  - RSI, MACD, EMA/SMA, BB%, ATR, OBV trend, CMF, accumulation score
+- **Cost panel:** Right sidebar showing two sections:
+  - **Current Debate:** Input/output tokens and USD cost (updates in real-time via ref accumulation)
+  - **Session Total:** Cumulative cost across all debates in this session (ref-accumulated, not re-read from file)
   - Model-specific pricing: Opus ($15/$75), Sonnet ($3/$15), Haiku ($0.80/$4) per 1M tokens
+- **Export panel:** Always-visible sidebar section, two buttons:
+  - **↓ Conversation** — transcript + market data as Markdown file
+  - **↓ Conversation + Prompts** — same plus all Claude system prompts and message arrays
 - **Debug panel:** Toggle to view exact system prompt and message array sent to each agent
 - **Smart scroll:** Page only auto-scrolls to bottom if you're already near the bottom; won't yank you away while reading
-- **Markdown rendering:** Headers, bold, code blocks, lists render properly (no raw markdown tags)
 - **Final/Escalation boxes:** Styled full-width boxes (green for consensus, red for tie-breaker)
 
 ---
@@ -333,19 +345,17 @@ You can see at a glance if they're converging or repeating. If agreement score s
 - Graceful degradation: one ticker timeout won't block the debate
 
 **Caching:**
-- Market data is cached to `.cache/market-data-cache.json` (git-ignored)
-- **Cache TTL: 1 hour** — if data is < 1 hour old, use cached data (no API call)
-- If cache is stale (> 1 hour old), fetch fresh data from Supabase
-- If API fails but cache exists (even if stale), use cached data as fallback
-- Reduces API load and speeds up debates on same tickers
+- **Always fetches live from Supabase on every request** — no stale data ever shown to agents
+- Cache at `.cache/market-data-cache.json` is written after each successful fetch
+- Cache is only read as **emergency fallback** when Supabase is unreachable
+- If API fails and no cache exists, the debate errors with a clear message
 
 **Cache behavior:**
 | Scenario | Action |
 |----------|--------|
-| First request for NVDA | Fetch from Supabase (25s timeout) → Save cache |
-| 2nd request within 1 hour | Load from cache (instant) |
-| Request after 1 hour | Fetch fresh from Supabase (25s timeout) → Update cache |
-| API times out + cache exists | Use cached data (graceful fallback) |
+| Any request for NVDA | Fetch live from Supabase (25s timeout) → Save cache |
+| API times out + cache exists | Use stale cache (graceful fallback) |
+| API times out + no cache | Error — debate cannot proceed |
 
 **To clear cache:**
 ```bash
@@ -356,15 +366,66 @@ rm -rf .cache/
 - When data is > 1 hour old, trigger stock-predictor's refresh endpoint to get fresh ML predictions and edge scores
 - Currently just uses OHLCV data; can later include pre-calculated indicators from stock-predictor
 
-**Indicators included:**
-- EMA (20, 50, 200)
-- RSI (14)
-- MACD (12, 26, 9)
-- Bollinger Bands (20, 2)
-- ATR (14)
+**Indicators included (computed locally from OHLCV):**
+- EMA (20, 50, 200), RSI (14), MACD (12/26/9), Bollinger Bands (20,2), ATR (14)
+- OBV (trend: rising/falling over last 20 bars)
+- CMF (20-period Chaikin Money Flow)
+- Accumulation score (0-100): 60% OBV trend + 40% CMF
+
+**Slow data (from Supabase `slow_data` table, fetched in parallel with prices):**
+- `earnings_flag` → earnings date, days away, soon flag
+- `analyst_data` → target, low/high, recommendation, count, P/E, cash/debt, sector
+- `put_call_ratio` → PCR + label
+- `short_interest` → short %, label
+- `insider_transactions` → BUYING/SELLING/MIXED signal + detail
+- `google_trends` → current score (0-100), % change, label
+- `relative_strength` → 30d stock return, SPY return, alpha
+- `trend_18m` → trend direction (up/down/flat)
+- `industry_chart` → alpha vs sector ETF + ETF name
+- `support_resistance` → support 20d, resistance 20d, safe strike
+
+**Token cost of market data block per turn:**
+- Old (raw JSON dump): ~630 tokens per ticker
+- New (`formatSnapshot()` text): ~150 tokens per ticker (~75% reduction)
 
 **To add more:**
-Edit `lib/market-data.ts` and add your indicator function in `getTechnicalSnapshot()`.
+Edit `lib/market-data.ts` → `getTechnicalSnapshot()` for local indicators, or add new `call_name` entries from `slow_data`.
+
+---
+
+## Critical Architecture Notes (do not regress)
+
+### React StrictMode + state mutation bug
+`setTurns` updater functions **must never mutate objects inside `prev`**. React StrictMode calls updaters twice with the same `prev` reference — any mutation causes tokens to be appended twice. Always return new objects:
+```js
+// WRONG — mutates last (seen twice by StrictMode):
+last.text += token;
+return [...prev.slice(0, -1), last];
+
+// CORRECT — always spread:
+return [...prev.slice(0, idx), { ...last, text: last.text + token }];
+```
+
+### Streaming rendering split
+While a turn is streaming (`done === false`), render in `<pre className="whitespace-pre-wrap font-sans">`. Switch to `<ReactMarkdown>` only when `done === true`. ReactMarkdown on partial tokens creates artifacts like `##ng` and `hat400.75`.
+
+### Final/Escalation dedup
+When a `final` or `escalation` event arrives, **drop the last Elena turn** from the turns array before inserting the SpecialBubble. The orchestrator emits Elena's final text as both streamed tokens (ChatBubble) and a `final` event — without this, the recommendation appears twice.
+
+### Context window management (orchestrator)
+Transcript passed to agents: **last 6 entries in full**, older entries summarized to stance/conviction/agree one-liners. Prevents context growth from degrading response quality in long debates.
+
+### Session cost accumulation
+Session total is accumulated via a `useRef` counter that adds each debate's cost in the `finally` block of the fetch — not re-read from the costs file. This avoids race conditions and stale reads.
+
+### Market data format (orchestrator)
+Never pass raw `JSON.stringify(snapshot)` to agents — it was ~630 tokens/ticker and included `recentCandles` (10 raw OHLCV bars the agents never use). Use `formatSnapshot()` which produces a compact human-readable text block (~150 tokens). Agents read text better than raw JSON anyway.
+
+### Anthropic overloaded errors
+`streamAgent` in `lib/claude.ts` retries up to 3× on `overloaded_error` / HTTP 529 (3s, 6s, 9s delays) before throwing. Yields a `retry` chunk so the orchestrator can surface "API overloaded — retrying (1 of 3)..." as a system message. Only retries if no tokens have been streamed yet (`started === false`). Check condition: `e?.status === 529 || e?.error?.type === 'overloaded_error' || e?.message?.includes('overloaded_error')`.
+
+### Debate early exit (no ticker)
+After each round, if both agents have `conviction === 0`, the orchestrator immediately yields an escalation with "MISSING DATA" and exits. Prevents wasted rounds where agents loop asking for the ticker.
 
 ---
 

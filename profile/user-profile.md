@@ -10,7 +10,7 @@
 ---
 
 ## CAPITAL & POSITION SIZING
-- **Account Balance**: ~$120,000
+- **Account Balance**: ~$120,000, but uisn gmargin accoun tin IB. so my positions are at 160,000$
 
 ---
 

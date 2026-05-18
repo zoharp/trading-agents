@@ -46,6 +46,34 @@ function deduplicateText(text: string): string {
   return out.join('\n');
 }
 
+const NUM_SPLIT = /(-?\$?(?:\d[\d,]*)(?:\.\d+)?%?)/g;
+const NUM_TEST = /^-?\$?(?:\d[\d,]*)(?:\.\d+)?%?$/;
+
+function NumberHighlight({ text }: { text: string }) {
+  const parts = text.split(NUM_SPLIT);
+  return (
+    <>
+      {parts.map((part, i) =>
+        NUM_TEST.test(part) && /\d/.test(part) ? (
+          <span key={i} className="text-[#7ec4cf] font-medium">{part}</span>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function colorizeChildren(children: React.ReactNode): React.ReactNode {
+  if (typeof children === 'string') return <NumberHighlight text={children} />;
+  if (Array.isArray(children)) {
+    return children.map((child, i) =>
+      typeof child === 'string' ? <NumberHighlight key={i} text={child} /> : child
+    );
+  }
+  return children;
+}
+
 interface MarketSnapshot {
   symbol: string;
   asOf: string;
@@ -62,8 +90,41 @@ interface MarketSnapshot {
   macd: { macd: number; signal: number; hist: number };
   bollinger: { upper: number; mid: number; lower: number; pctB: number };
   atr14: number;
+  obv: number;
+  obvTrend: 'rising' | 'falling';
+  cmf: number;
+  accumulationScore: number;
   regime: string;
   trendStructure: string;
+  // slow_data fields
+  earningsDate?: string;
+  earningsDaysAway?: number;
+  earningsSoon?: boolean;
+  analystTarget?: number;
+  analystRecommendation?: string;
+  analystCount?: number;
+  peRatio?: number;
+  cashDebtRatio?: number;
+  cashDebtLabel?: string;
+  sector?: string;
+  putCallRatio?: number;
+  putCallLabel?: string;
+  shortPct?: number;
+  shortLabel?: string;
+  insiderSignal?: string;
+  insiderDetail?: string;
+  googleTrendsCurrent?: number;
+  googleTrendsChange?: number;
+  googleTrendsLabel?: string;
+  stockReturn30d?: number;
+  spyReturn30d?: number;
+  alphaVsSpy?: number;
+  trendDirection?: string;
+  industryAlpha?: number;
+  industryEtfName?: string;
+  support20d?: number;
+  resistance20d?: number;
+  safeStrike?: number;
 }
 
 interface Stance {
@@ -102,7 +163,7 @@ export default function Home() {
   const [running, setRunning] = useState(false);
   const [cost, setCost] = useState<Cost>({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
   const [sessionCostTotal, setSessionCostTotal] = useState<number>(0);
-  const [model, setModel] = useState<string>('claude-sonnet-4-6');
+  const [model, setModel] = useState<string>('claude-haiku-4-5-20251001');
   const [canResume, setCanResume] = useState<boolean>(false);
   const [resumeState, setResumeState] = useState<any>(null);
   const [debugInfo, setDebugInfo] = useState<{ systemPrompt: string; messages: any[] } | null>(null);
@@ -691,15 +752,18 @@ function ChatBubble({
                 ),
               h2: ({ children }) => <h2 className="font-bold text-[#e8e6e1] mt-3 mb-1">{children}</h2>,
               h3: ({ children }) => <h3 className="font-bold text-[#d8d6d1] mt-2 mb-1">{children}</h3>,
-              strong: ({ children }) => <strong className="text-[#e8e6e1]">{children}</strong>,
+              p: ({ children }) => <p className="mb-1">{colorizeChildren(children)}</p>,
+              strong: ({ children }) => <strong className="text-[#e8e6e1]">{colorizeChildren(children)}</strong>,
               ul: ({ children }) => <ul className="list-disc list-inside my-2">{children}</ul>,
-              li: ({ children }) => <li className="ml-2">{children}</li>,
+              li: ({ children }) => <li className="ml-2">{colorizeChildren(children)}</li>,
             }}
           >
             {displayText}
           </ReactMarkdown>
         ) : (
-          <pre className="whitespace-pre-wrap font-sans text-sm text-[#d8d6d1] leading-relaxed">{displayText}</pre>
+          <div className="whitespace-pre-wrap font-sans text-sm text-[#d8d6d1] leading-relaxed">
+            <NumberHighlight text={displayText} />
+          </div>
         )}
       </div>
     </div>
@@ -731,9 +795,10 @@ function SpecialBubble({ kind, text }: { kind: 'final' | 'escalation'; text: str
               ),
             h2: ({ children }) => <h2 className="font-bold text-[#e8e6e1] mt-3 mb-1">{children}</h2>,
             h3: ({ children }) => <h3 className="font-bold text-[#d8d6d1] mt-2 mb-1">{children}</h3>,
-            strong: ({ children }) => <strong className="text-[#e8e6e1]">{children}</strong>,
+            p: ({ children }) => <p className="mb-1">{colorizeChildren(children)}</p>,
+            strong: ({ children }) => <strong className="text-[#e8e6e1]">{colorizeChildren(children)}</strong>,
             ul: ({ children }) => <ul className="list-disc list-inside my-2">{children}</ul>,
-            li: ({ children }) => <li className="ml-2">{children}</li>,
+            li: ({ children }) => <li className="ml-2">{colorizeChildren(children)}</li>,
           }}
         >
           {text}
@@ -794,63 +859,138 @@ function RoundSummary({ summary }: { summary: { round: number; elena: Stance; ma
   );
 }
 
+function DataRow({ label, value, valueClass = 'text-[#d8d6d1]' }: { label: string; value: React.ReactNode; valueClass?: string }) {
+  return (
+    <div className="flex justify-between items-baseline gap-2 text-xs">
+      <span className="text-[#555]">{label}</span>
+      <span className={`font-medium tabular-nums ${valueClass}`}>{value}</span>
+    </div>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return <div className="text-[10px] font-bold text-[#666] uppercase tracking-wider pt-2 pb-0.5 border-t border-[#1e1e22]">{children}</div>;
+}
+
 function MarketDataPanel({ data }: { data: Record<string, MarketSnapshot> }) {
   const tickers = Object.keys(data);
   if (tickers.length === 0) return null;
 
   return (
-    <div className="bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
+    <div className="bg-[#15151a] border border-[#2a2a2d] rounded p-3 text-sm font-mono space-y-3">
       <div className="text-xs font-bold text-[#888] uppercase">Market Data</div>
       {tickers.map(ticker => {
         const s = data[ticker];
         const changeColor = s.changePct >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]';
-        const rsiColor = s.rsi14 > 70 ? 'text-[#d97474]' : s.rsi14 < 30 ? 'text-[#5ab884]' : 'text-[#d4a574]';
+        const rsiColor = s.rsi14 > 70 ? 'text-[#d97474]' : s.rsi14 < 30 ? 'text-[#5ab884]' : 'text-[#7ec4cf]';
         const macdColor = s.macd.hist >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]';
-        const bbColor = s.bollinger.pctB > 1 ? 'text-[#d97474]' : s.bollinger.pctB < 0 ? 'text-[#5ab884]' : 'text-[#d8d6d1]';
+        const bbColor = s.bollinger.pctB > 1 ? 'text-[#d97474]' : s.bollinger.pctB < 0 ? 'text-[#5ab884]' : 'text-[#7ec4cf]';
+        const cmfColor = s.cmf > 0.1 ? 'text-[#5ab884]' : s.cmf < -0.1 ? 'text-[#d97474]' : 'text-[#7ec4cf]';
+        const obvColor = s.obvTrend === 'rising' ? 'text-[#5ab884]' : 'text-[#d97474]';
+        const accColor = s.accumulationScore >= 60 ? 'text-[#5ab884]' : s.accumulationScore <= 40 ? 'text-[#d97474]' : 'text-[#d4a574]';
         const pricePct = s.high52w > s.low52w
           ? Math.round(((s.price - s.low52w) / (s.high52w - s.low52w)) * 100)
           : 50;
 
         return (
-          <div key={ticker} className="space-y-2 pb-3 border-b border-[#2a2a2d] last:border-0 last:pb-0">
-            <div className="flex items-baseline gap-2">
+          <div key={ticker} className="space-y-1 pb-3 border-b border-[#2a2a2d] last:border-0 last:pb-0">
+            {/* Header */}
+            <div className="flex items-baseline gap-2 mb-2">
               <span className="font-bold text-[#e8e6e1] text-base">{s.symbol}</span>
-              <span className="text-[#d8d6d1]">${s.price.toFixed(2)}</span>
+              <span className="text-[#7ec4cf] font-medium">${s.price.toFixed(2)}</span>
               <span className={`text-xs font-bold ${changeColor}`}>
                 {s.changePct >= 0 ? '+' : ''}{s.changePct.toFixed(2)}%
               </span>
             </div>
 
             {/* 52w range bar */}
-            <div className="space-y-1">
+            <div className="space-y-1 mb-2">
               <div className="flex justify-between text-[10px] text-[#555]">
                 <span>${s.low52w}</span>
-                <span className="text-[#666]">52w range ({pricePct}%)</span>
+                <span className="text-[#555]">52w ({pricePct}%)</span>
                 <span>${s.high52w}</span>
               </div>
               <div className="relative h-1 bg-[#2a2a2d] rounded-full">
-                <div
-                  className="absolute top-0 w-2 h-1 bg-[#d4a574] rounded-full -ml-1"
-                  style={{ left: `${pricePct}%` }}
-                />
+                <div className="absolute top-0 w-2 h-1 bg-[#d4a574] rounded-full -ml-1" style={{ left: `${pricePct}%` }} />
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-              <div className="text-[#666]">RSI <span className={`${rsiColor} font-bold`}>{s.rsi14}</span></div>
-              <div className="text-[#666]">MACD <span className={`${macdColor} font-bold`}>{s.macd.hist >= 0 ? '+' : ''}{s.macd.hist.toFixed(2)}</span></div>
-              <div className="text-[#666]">EMA20 <span className="text-[#d8d6d1]">${s.ema20}</span></div>
-              <div className="text-[#666]">SMA50 <span className="text-[#d8d6d1]">${s.sma50}</span></div>
-              <div className="text-[#666]">SMA200 <span className="text-[#d8d6d1]">${s.sma200}</span></div>
-              <div className="text-[#666]">ATR <span className="text-[#d8d6d1]">${s.atr14}</span></div>
-              <div className="text-[#666]">BB% <span className={bbColor}>{(s.bollinger.pctB * 100).toFixed(0)}%</span></div>
-              <div className="text-[#666]">BB mid <span className="text-[#d8d6d1]">${s.bollinger.mid}</span></div>
-            </div>
+            {/* Earnings */}
+            {s.earningsDate && (
+              <>
+                <SectionLabel>Earnings</SectionLabel>
+                <DataRow
+                  label="Next date"
+                  value={`${s.earningsDate}${s.earningsDaysAway !== undefined ? ` (${s.earningsDaysAway}d)` : ''}`}
+                  valueClass={s.earningsSoon ? 'text-[#d97474] font-bold' : 'text-[#7ec4cf]'}
+                />
+              </>
+            )}
 
-            <div className="text-[10px] text-[#555] leading-snug space-y-0.5">
+            {/* Analyst / Fundamentals */}
+            {(s.analystTarget || s.peRatio || s.cashDebtRatio) && (
+              <>
+                <SectionLabel>Analyst / Fundamentals</SectionLabel>
+                {s.analystTarget && <DataRow label={`Analyst target (${s.analystCount ?? '?'})`} value={`$${s.analystTarget.toFixed(2)}`} valueClass="text-[#7ec4cf]" />}
+                {s.analystRecommendation && <DataRow label="Consensus" value={s.analystRecommendation.toUpperCase()} valueClass={s.analystRecommendation.toLowerCase().includes('buy') ? 'text-[#5ab884]' : s.analystRecommendation.toLowerCase().includes('sell') ? 'text-[#d97474]' : 'text-[#d4a574]'} />}
+                {s.peRatio && <DataRow label="P/E ratio" value={s.peRatio.toFixed(1)} valueClass="text-[#7ec4cf]" />}
+                {s.cashDebtRatio !== undefined && <DataRow label={`Cash/Debt (${s.cashDebtLabel ?? ''})`} value={`${s.cashDebtRatio.toFixed(2)}x`} valueClass={s.cashDebtRatio > 2 ? 'text-[#5ab884]' : s.cashDebtRatio < 0.5 ? 'text-[#d97474]' : 'text-[#7ec4cf]'} />}
+                {s.sector && <DataRow label="Sector" value={s.sector} valueClass="text-[#888]" />}
+              </>
+            )}
+
+            {/* Sentiment */}
+            {(s.putCallRatio || s.shortPct !== undefined || s.insiderSignal) && (
+              <>
+                <SectionLabel>Sentiment</SectionLabel>
+                {s.putCallRatio !== undefined && <DataRow label={`Put/Call (${s.putCallLabel ?? ''})`} value={s.putCallRatio.toFixed(2)} valueClass={s.putCallRatio < 0.7 ? 'text-[#5ab884]' : s.putCallRatio > 1.3 ? 'text-[#d97474]' : 'text-[#7ec4cf]'} />}
+                {s.shortPct !== undefined && <DataRow label={`Short interest (${s.shortLabel ?? ''})`} value={`${s.shortPct.toFixed(1)}%`} valueClass={s.shortPct > 15 ? 'text-[#d97474]' : s.shortPct < 5 ? 'text-[#5ab884]' : 'text-[#7ec4cf]'} />}
+                {s.insiderSignal && <DataRow label="Insider (45d)" value={s.insiderSignal} valueClass={s.insiderSignal === 'BUYING' ? 'text-[#5ab884]' : s.insiderSignal === 'SELLING' ? 'text-[#d97474]' : 'text-[#d4a574]'} />}
+                {s.googleTrendsChange !== undefined && <DataRow label={`Google Trends (${s.googleTrendsLabel ?? ''})`} value={`${s.googleTrendsChange >= 0 ? '+' : ''}${s.googleTrendsChange.toFixed(1)}%`} valueClass={s.googleTrendsChange > 0 ? 'text-[#5ab884]' : 'text-[#d97474]'} />}
+              </>
+            )}
+
+            {/* Relative performance */}
+            {(s.stockReturn30d !== undefined || s.alphaVsSpy !== undefined || s.industryAlpha !== undefined) && (
+              <>
+                <SectionLabel>Performance</SectionLabel>
+                {s.stockReturn30d !== undefined && <DataRow label="Return 30d" value={`${s.stockReturn30d >= 0 ? '+' : ''}${s.stockReturn30d.toFixed(2)}%`} valueClass={s.stockReturn30d >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]'} />}
+                {s.alphaVsSpy !== undefined && <DataRow label="Alpha vs SPY" value={`${s.alphaVsSpy >= 0 ? '+' : ''}${s.alphaVsSpy.toFixed(2)}%`} valueClass={s.alphaVsSpy >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]'} />}
+                {s.industryAlpha !== undefined && s.industryEtfName && <DataRow label={`Alpha vs ${s.industryEtfName}`} value={`${s.industryAlpha >= 0 ? '+' : ''}${s.industryAlpha.toFixed(2)}%`} valueClass={s.industryAlpha >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]'} />}
+                {s.trendDirection && <DataRow label="18m trend" value={s.trendDirection} valueClass={s.trendDirection === 'up' ? 'text-[#5ab884]' : s.trendDirection === 'down' ? 'text-[#d97474]' : 'text-[#d4a574]'} />}
+              </>
+            )}
+
+            {/* Support / Resistance */}
+            {(s.support20d || s.resistance20d) && (
+              <>
+                <SectionLabel>Support / Resistance</SectionLabel>
+                {s.support20d && <DataRow label="Support 20d" value={`$${s.support20d.toFixed(2)}`} valueClass="text-[#5ab884]" />}
+                {s.safeStrike && <DataRow label="Safe strike" value={`$${s.safeStrike.toFixed(2)}`} valueClass="text-[#7ec4cf]" />}
+                {s.resistance20d && <DataRow label="Resistance 20d" value={`$${s.resistance20d.toFixed(2)}`} valueClass="text-[#d97474]" />}
+              </>
+            )}
+
+            {/* Technical */}
+            <SectionLabel>Technical</SectionLabel>
+            <DataRow label="RSI 14" value={s.rsi14} valueClass={rsiColor} />
+            <DataRow label={`MACD hist`} value={`${s.macd.hist >= 0 ? '+' : ''}${s.macd.hist.toFixed(2)}`} valueClass={macdColor} />
+            <DataRow label="EMA20" value={`$${s.ema20}`} />
+            <DataRow label="SMA50" value={`$${s.sma50}`} />
+            <DataRow label="SMA200" value={`$${s.sma200}`} />
+            <DataRow label="ATR 14" value={`$${s.atr14}`} />
+            <DataRow label="BB%" value={`${(s.bollinger.pctB * 100).toFixed(0)}%`} valueClass={bbColor} />
+
+            {/* Accumulation */}
+            <SectionLabel>Accumulation</SectionLabel>
+            <DataRow label="Score" value={s.accumulationScore} valueClass={accColor} />
+            <DataRow label="OBV trend" value={s.obvTrend} valueClass={obvColor} />
+            <DataRow label="CMF 20" value={s.cmf.toFixed(3)} valueClass={cmfColor} />
+
+            <div className="text-[10px] text-[#444] pt-1">
               <div>{s.regime}</div>
               <div>{s.trendStructure}</div>
-              <div className="text-[#444]">as of {s.asOf}</div>
+              <div>as of {s.asOf}</div>
             </div>
           </div>
         );
