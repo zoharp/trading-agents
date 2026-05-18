@@ -28,9 +28,11 @@ git clone https://github.com/zoharp/trading-agents.git
 cd trading-agents
 npm install
 
-# 2. Add your Anthropic API key
+# 2. Add environment variables
 cp .env.local.example .env.local
-# Edit .env.local, paste your key from https://console.anthropic.com/account/keys
+# Edit .env.local and fill in:
+# - ANTHROPIC_API_KEY from https://console.anthropic.com/account/keys
+# - SUPABASE_URL and SUPABASE_KEY from stock-predictor's .env (shared database)
 
 # 3. (Optional) Customize your profile
 # Open profile/user-profile.md and fill in your details
@@ -53,7 +55,7 @@ You submit: "Should I buy NVDA here?"
     ↓
 Backend extracts ticker (NVDA)
     ↓
-Fetch 1yr daily candles from Yahoo Finance
+Fetch 1yr daily candles from Supabase (stock-predictor database)
     ↓
 Compute indicators: EMA, RSI, MACD, Bollinger, ATR
     ↓
@@ -69,6 +71,8 @@ Consensus reached?
   → YES: Elena writes FINAL RECOMMENDATION → you see action plan
   → NO:  10 rounds passed → Elena writes ESCALATION → you decide
 ```
+
+**Data source:** Uses market data from stock-predictor's Supabase database. Can later be enhanced with stock-predictor's pre-calculated ML predictions and edge scores.
 
 ---
 
@@ -142,13 +146,17 @@ Push to GitHub → Vercel auto-deploys.
 ### One-time setup:
 1. Push repo to GitHub (user: `zoharp`, repo: `trading-agents`)
 2. Connect on [vercel.com](https://vercel.com) (import repo)
-3. Add environment variable: `ANTHROPIC_API_KEY` → your key from [Anthropic Console](https://console.anthropic.com/account/keys)
+3. Add environment variables in Vercel project settings:
+   - `ANTHROPIC_API_KEY` → from [Anthropic Console](https://console.anthropic.com/account/keys)
+   - `SUPABASE_URL` → from stock-predictor's Supabase project
+   - `SUPABASE_KEY` → from stock-predictor's Supabase project (anon key)
 4. Deploy
 
 ### Important:
 - **Vercel Pro required** ($20/mo) for 5-minute debates
 - Hobby tier (free) has 10-second limit — not enough for agents to finish
 - To reduce timeout: lower `MAX_ROUNDS` in `lib/orchestrator.ts`
+- Supabase must be accessible from Vercel (check firewall rules if needed)
 
 ---
 
@@ -174,10 +182,10 @@ For design rationale on debate efficiency, see **[DEBATE_STRUCTURE.md](./DEBATE_
 🚨 **Not financial advice.** This is a thinking tool. The agents can be confidently wrong.
 
 - **Ticker extraction:** Regex-based (2–5 uppercase letters or `$SYMBOL`). Refine if needed.
-- **Daily data only:** Yahoo Finance provides daily OHLCV candles. Intraday requires Polygon/Alpaca.
+- **Daily data only:** Supabase (stock-predictor) provides daily OHLCV candles. Intraday requires additional API integration.
 - **No persistence:** Each session is fresh (no history storage).
 - **Rate limits:** Anthropic has per-minute and monthly quotas. Monitor your [Anthropic dashboard](https://console.anthropic.com/account/usage).
-- **Market data caching:** 1-hour TTL. Reuse cached data to reduce API calls. Second debate on same ticker = instant (no Yahoo Finance call). Cached data is used as fallback if API times out.
+- **Market data caching:** 1-hour TTL. Reuse cached data to reduce API calls. Second debate on same ticker = instant (no Supabase call). Cached data is used as fallback if API times out.
 - **Cost:** Varies by model:
   - Haiku: ~$0.02–$0.05 per debate (fastest, cheapest)
   - Sonnet: ~$0.10–$0.25 per debate (balanced, recommended)
@@ -190,7 +198,7 @@ For design rationale on debate efficiency, see **[DEBATE_STRUCTURE.md](./DEBATE_
 - **Frontend:** Next.js 15 (App Router), React 19, Tailwind CSS
 - **Backend:** Next.js API Routes (Node.js)
 - **AI:** Anthropic Claude (Opus, Sonnet, or Haiku — user selects per debate)
-- **Market Data:** Yahoo Finance REST API (free, no key, 25-second timeout protection, 1-hour caching)
+- **Market Data:** Supabase (stock-predictor database, 25-second timeout protection, 1-hour caching)
 - **Streaming:** Server-Sent Events (SSE)
 - **Hosting:** Vercel
 - **Cost persistence:** JSON file (`.cache/debate-costs.json`)

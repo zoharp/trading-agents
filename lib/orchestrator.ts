@@ -181,14 +181,33 @@ ${marketBlock}
 
     const buildMessages = (forAgent: 'Elena' | 'Marcus'): ChatMessage[] => {
       const msgs: ChatMessage[] = [{ role: 'user', content: sharedContext }];
-      for (const entry of transcript) {
+
+      // Keep only the last 6 transcript entries (3 rounds) in full.
+      // Older rounds are replaced with a compact stance summary to prevent context bloat.
+      const FULL_WINDOW = 6;
+      const older = transcript.slice(0, Math.max(0, transcript.length - FULL_WINDOW));
+      const recent = transcript.slice(-FULL_WINDOW);
+
+      if (older.length > 0) {
+        const summary = older.map(e => {
+          const stanceMatch = e.text.match(/STANCE:\s*(\w+).*?CONVICTION:\s*(\d+).*?AGREE_WITH_PARTNER:\s*(\w+)/s);
+          if (stanceMatch) {
+            return `[${e.speaker} — earlier: stance=${stanceMatch[1]}, conviction=${stanceMatch[2]}, agree=${stanceMatch[3]}]`;
+          }
+          return `[${e.speaker} — earlier turn (summarized)]`;
+        }).join('\n');
+        msgs.push({ role: 'user', content: `Previous rounds summary:\n${summary}` });
+        msgs.push({ role: 'assistant', content: 'Understood. I will build on those prior positions.' });
+      }
+
+      for (const entry of recent) {
         if (entry.speaker === forAgent) {
           msgs.push({ role: 'assistant', content: entry.text });
         } else {
           msgs.push({ role: 'user', content: `[${entry.speaker} said]:\n${entry.text}` });
         }
       }
-      // Ensure last message is from "user" (the partner)
+
       if (msgs[msgs.length - 1].role === 'assistant') {
         msgs.push({ role: 'user', content: 'Continue the debate.' });
       }

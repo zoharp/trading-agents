@@ -144,35 +144,83 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return Promise.race([promise, timeout]);
 }
 
-export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSnapshot> {
-  // Check cache first
-  const cached = getCachedData(symbol);
-  if (cached) {
-    return cached;
+async function getSupabasePrices(symbol: string): Promise<any[]> {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    throw new Error('Supabase credentials missing in environment');
   }
 
+  const allRows: any[] = [];
+  const pageSize = 1000;
+  let offset = 0;
+
+  while (true) {
+    const url = new URL(`${supabaseUrl}/rest/v1/prices`);
+    url.searchParams.append('select', '*');
+    url.searchParams.append('ticker', `eq.${symbol.toUpperCase()}`);
+    url.searchParams.append('order', 'date');
+    url.searchParams.append('offset', offset.toString());
+    url.searchParams.append('limit', pageSize.toString());
+
+    const response = await withTimeout(
+      fetch(url.toString(), {
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+        },
+      }),
+      25000
+    );
+
+    if (!response.ok) {
+      throw new Error(`Supabase error: HTTP ${response.status}`);
+    }
+
+    const rows = await response.json();
+    allRows.push(...rows);
+
+    if (rows.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return allRows;
+}
+
+export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSnapshot> {
+  // Always fetch live from Supabase — cache is only used as fallback if the fetch fails
   const end = new Date();
   const start = new Date();
   start.setFullYear(end.getFullYear() - 1);
 
   let result: any;
   try {
-    const period1 = Math.floor(start.getTime() / 1000);
-    const period2 = Math.floor(end.getTime() / 1000);
-    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&period1=${period1}&period2=${period2}`;
+    // Fetch from Supabase instead of Yahoo Finance
+    const rows = await getSupabasePrices(symbol);
 
-    const response = await withTimeout(fetch(chartUrl), 25000);
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
+    if (!rows || rows.length === 0) {
+      throw new Error('No data returned from Supabase');
     }
 
-    const data = await response.json();
-    result = data.chart.result?.[0];
-
-    if (!result || !result.timestamp) {
-      throw new Error('No data returned from Yahoo Finance');
-    }
+    // Transform Supabase rows to match our expected format
+    result = {
+      timestamp: rows.map((r: any) => {
+        const d = new Date(r.date);
+        return Math.floor(d.getTime() / 1000);
+      }),
+      indicators: {
+        quote: [
+          {
+            open: rows.map((r: any) => r.open),
+            high: rows.map((r: any) => r.high),
+            low: rows.map((r: any) => r.low),
+            close: rows.map((r: any) => r.close),
+            volume: rows.map((r: any) => r.volume),
+          },
+        ],
+      },
+    };
   } catch (e) {
     // API call failed - try to use stale cache as fallback
     const cache = loadCache();
@@ -286,7 +334,22 @@ export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSna
 export function extractTickers(text: string): string[] {
   const dollarTickers = Array.from(text.matchAll(/\$([A-Z]{1,5})\b/g)).map(m => m[1]);
   const bareTickers = Array.from(text.matchAll(/\b([A-Z]{2,5})\b/g)).map(m => m[1]);
-  const stopwords = new Set(['I', 'A', 'THE', 'AND', 'OR', 'BUT', 'IF', 'IT', 'IS', 'TO', 'FOR', 'AT', 'IN', 'ON', 'BUY', 'SELL', 'HOLD', 'LONG', 'SHORT', 'STOP', 'TP', 'SL', 'USD', 'EUR']);
+  const stopwords = new Set([
+    // Grammar
+    'I', 'A', 'THE', 'AND', 'OR', 'BUT', 'IF', 'IT', 'IS', 'TO', 'FOR', 'AT', 'IN', 'ON', 'MY', 'ME', 'WE',
+    // Trade actions
+    'BUY', 'SELL', 'HOLD', 'LONG', 'SHORT', 'STOP', 'TP', 'SL', 'ENTER', 'EXIT',
+    // Currencies / general finance
+    'USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'YTD', 'MTD', 'QTD', 'EOD', 'EOW',
+    // Options strategy abbreviations
+    'CSP', 'CC', 'PMR', 'PCS', 'CCS', 'BPS', 'BCS', 'PMCC', 'IC', 'ICS', 'BWB', 'RWB',
+    // Options terminology
+    'PUT', 'CALL', 'ITM', 'OTM', 'ATM', 'DTE', 'IV', 'HV', 'RV', 'VIX', 'EXP',
+    // Technical indicator abbreviations
+    'SMA', 'EMA', 'RSI', 'MACD', 'ATR', 'BB', 'OBV', 'CMF', 'MFI', 'ADX', 'ROC',
+    // Time / misc
+    'PM', 'AH', 'AM', 'NOW', 'NEW', 'OLD', 'HIGH', 'LOW', 'MID', 'MAX', 'MIN',
+  ]);
   const all = [...dollarTickers, ...bareTickers.filter(t => !stopwords.has(t))];
   return Array.from(new Set(all));
 }

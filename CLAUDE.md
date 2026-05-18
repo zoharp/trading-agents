@@ -18,7 +18,7 @@
 - **Frontend:** Next.js 15 (App Router, React 19, Tailwind CSS)
 - **Backend:** Next.js API Routes (Node.js)
 - **AI/LLM:** Anthropic Claude (Opus/Sonnet/Haiku) via official SDK
-- **Market Data:** Yahoo Finance REST API (free, no API key needed) with 25-second timeout protection
+- **Market Data:** Supabase (stock-predictor database) with 25-second timeout protection
 - **Streaming:** Server-Sent Events (SSE)
 - **Hosting:** Vercel (frontend) — auto-deploys on push to main
 
@@ -34,15 +34,64 @@ Production URL: `https://two-desk.vercel.app` (or your Vercel custom domain)
 ### Prerequisites for Vercel deployment
 1. Repo on GitHub (user: zoharp, repo: trading-agents)
 2. Vercel account connected to GitHub
-3. Add `ANTHROPIC_API_KEY` in Vercel project settings → Environment Variables
+3. Add environment variables in Vercel project settings:
+   - `ANTHROPIC_API_KEY` — from [Anthropic Console](https://console.anthropic.com/account/keys)
+   - `SUPABASE_URL` — from stock-predictor Supabase project
+   - `SUPABASE_KEY` — from stock-predictor Supabase project (anon key)
 4. Vercel Pro required for 5-minute debate timeout (`maxDuration = 300` in `app/api/debate/route.ts`)
 
 ---
 
 ## Current versions
 
-- **Frontend:** `0.1.0`
-- **Backend:** `0.1.0`
+- **Frontend:** `0.2.0`
+- **Backend:** `0.2.0`
+- **Data Integration:** Supabase (stock-predictor) — live since May 17, 2026
+
+---
+
+## Data Pipeline (NEW)
+
+**trading-agents now sources market data directly from stock-predictor's Supabase database** instead of Yahoo Finance. This gives agents richer context and faster access.
+
+### Architecture:
+```
+User submits: "What about TSLA?"
+        ↓
+trading-agents extracts ticker: TSLA
+        ↓
+Query Supabase prices table: SELECT * FROM prices WHERE ticker='TSLA' ORDER BY date
+        ↓
+Get ~1 year of OHLCV candles (paginated, 1000 rows per request)
+        ↓
+Calculate technical indicators locally (EMA, RSI, MACD, Bollinger, ATR)
+        ↓
+Build market context block for Elena & Marcus
+        ↓
+Debate proceeds with full technical setup
+```
+
+### Connection Details:
+- **Database:** Supabase (shared with stock-predictor)
+- **Table:** `prices` (schema: `date`, `ticker`, `open`, `high`, `low`, `close`, `volume`)
+- **Auth:** API key-based (anon key with RLS)
+- **Timeout:** 25 seconds (protects against Supabase slowness)
+- **Caching:** Local file cache (`.cache/market-data-cache.json`, 1-hour TTL)
+
+### Future Enhancement — stock-predictor Integration:
+When data is > 1 hour old, could query stock-predictor's `/api/stock/<ticker>/refresh` endpoint to fetch pre-calculated features:
+- **ML Prediction:** Probability of price rising 4%+ within 30 days (XGBoost-trained per ticker)
+- **Edge Score (0-100):** Composite score combining weighted signals:
+  - ML probability, analyst consensus, put/call ratio, short interest, alpha vs SPY, accumulation score, Google Trends, insider activity
+  - Labels: STRONG BUY (80+), BUY (65+), WEAK/AVOID (<65), OVERSOLD BOUNCE
+- **Accumulation Detection:** Detects institutional buying during sideways price action
+  - OBV trend, Chaikin Money Flow, price range tightness, volume patterns
+- **Support & Resistance:** Calculated 20-day support/resistance levels, safe strike recommendations
+- **Technical Features:** RSI, MACD, Bollinger Bands, ATR, OBV, CMF, momentum, returns
+
+This would give Elena & Marcus much richer pre-calculated context instead of just OHLCV, accelerating debate and improving conviction confidence.
+
+**See also:** [stock-predictor PROJECT_SUMMARY.md](../stock-predictor/stock-predictor/PROJECT_SUMMARY.md) for complete architecture.
 
 ---
 
@@ -91,12 +140,15 @@ trading-agents/
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
+SUPABASE_URL=https://...
+SUPABASE_KEY=eyJ...
 ```
 
 **Key notes:**
 - `.env.local` is git-ignored (do NOT commit)
 - `.env.local.example` shows the required keys only (no values)
-- On Vercel, set `ANTHROPIC_API_KEY` in project settings → Environment Variables
+- `SUPABASE_URL` and `SUPABASE_KEY` are copied from stock-predictor's `.env` (shared Supabase project)
+- On Vercel, set all three variables in project settings → Environment Variables
 
 ---
 
@@ -149,7 +201,7 @@ The response is SSE (text/event-stream). Each line is a JSON event:
 |------|---------|
 | `lib/claude.ts` | Streams agent responses from Claude API. Yields `AgentChunk` union (text or usage). Supports all Claude models. |
 | `lib/orchestrator.ts` | Debate loop: Elena & Marcus take turns, parse stances, track tokens, detect consensus. Saves costs to JSON. Respects `AbortSignal` for early stopping. |
-| `lib/market-data.ts` | Fetches 1-year daily candles from Yahoo Finance REST API (25s timeout), computes indicators (EMA, RSI, MACD, Bollinger Bands, ATR). Caches data with 1-hour TTL. |
+| `lib/market-data.ts` | **NEW:** Fetches 1-year daily OHLCV from Supabase `prices` table (stock-predictor DB), computes indicators (EMA, RSI, MACD, Bollinger Bands, ATR). 25s timeout, 1-hour caching. `getSupabasePrices()` handles pagination. |
 | `app/page.tsx` | Main UI: model selector, alternating chat-style bubbles, round summaries, cost panel (current + session total), pause/resume, stop button. |
 | `app/api/debate/route.ts` | SSE endpoint: accepts user request + model choice, calls `runDebate()`, streams events to client. Supports resume state. |
 | `app/api/debate-costs/route.ts` | GET endpoint: returns JSON array of all debate costs from `.cache/debate-costs.json`. Used to calculate session totals. |
@@ -272,32 +324,37 @@ You can see at a glance if they're converging or repeating. If agreement score s
 ## Market Data & Indicators
 
 **What we fetch:**
-- 1 year of daily OHLCV candles from Yahoo Finance REST API for each detected ticker
+- 1 year of daily OHLCV candles from Supabase (stock-predictor database) for each detected ticker
+- Data is sourced from stock-predictor's continuous data collection pipeline
 
 **Reliability:**
-- **25-second timeout protection:** API calls are wrapped with a timeout to prevent hanging indefinitely
+- **25-second timeout protection:** Supabase API calls are wrapped with a timeout to prevent hanging indefinitely
 - If fetch times out, falls back to cached data (even if stale)
 - Graceful degradation: one ticker timeout won't block the debate
 
 **Caching:**
 - Market data is cached to `.cache/market-data-cache.json` (git-ignored)
 - **Cache TTL: 1 hour** — if data is < 1 hour old, use cached data (no API call)
-- If cache is stale (> 1 hour old), fetch fresh data from Yahoo Finance
+- If cache is stale (> 1 hour old), fetch fresh data from Supabase
 - If API fails but cache exists (even if stale), use cached data as fallback
 - Reduces API load and speeds up debates on same tickers
 
 **Cache behavior:**
 | Scenario | Action |
 |----------|--------|
-| First request for NVDA | Fetch from Yahoo (25s timeout) → Save cache |
+| First request for NVDA | Fetch from Supabase (25s timeout) → Save cache |
 | 2nd request within 1 hour | Load from cache (instant) |
-| Request after 1 hour | Fetch fresh (25s timeout) → Update cache |
+| Request after 1 hour | Fetch fresh from Supabase (25s timeout) → Update cache |
 | API times out + cache exists | Use cached data (graceful fallback) |
 
 **To clear cache:**
 ```bash
 rm -rf .cache/
 ```
+
+**Future enhancement:**
+- When data is > 1 hour old, trigger stock-predictor's refresh endpoint to get fresh ML predictions and edge scores
+- Currently just uses OHLCV data; can later include pre-calculated indicators from stock-predictor
 
 **Indicators included:**
 - EMA (20, 50, 200)
@@ -327,10 +384,11 @@ npx tsc --noEmit
 ```
 
 ### Market data fetch errors
-Market data is fetched via Yahoo Finance REST API with 25-second timeout protection. If fetches time out frequently:
+Market data is fetched via Supabase with 25-second timeout protection. If fetches time out frequently:
 - Check your internet connection and firewall rules
-- Verify Yahoo Finance API is not rate-limiting (check `.cache/market-data-cache.json` for recent cached entries)
-- The system gracefully falls back to cached data if available
+- Verify `.env.local` has correct `SUPABASE_URL` and `SUPABASE_KEY`
+- The system gracefully falls back to cached data if available (check `.cache/market-data-cache.json` for recent entries)
+- If Supabase is down, debates can still proceed using cached data from previous queries
 
 ### Agents give wrong answers
 Edit their personas in `agents/*.md` — adjust indicators, tone, conviction rules.
@@ -362,9 +420,9 @@ cat .env.local
 - **Not financial advice.** This is a thinking tool. The agents can be confidently wrong.
 - **Ticker extraction is regex-based** (2–5 uppercase letters or `$SYMBOL`). Refine in `lib/market-data.ts` if needed.
 - **No persistence.** Each session is fresh (no chat history storage).
-- **Daily data only.** Yahoo Finance provides OHLCV daily candles. Intraday requires Polygon/Alpaca integration.
+- **Daily data only.** Supabase provides OHLCV daily candles. Intraday data would require additional API integration.
 - **Vercel Pro required** for 5-minute debates. Hobby tier (free) has 10-second limit.
-- **Rate limits:** Anthropic API has per-minute and monthly quotas. Monitor usage via your Anthropic dashboard.
+- **Rate limits:** Anthropic API has per-minute and monthly quotas. Monitor usage via your Anthropic dashboard. Supabase has soft rate limits per project.
 
 ---
 
@@ -374,7 +432,7 @@ cat .env.local
 |--------|-----|
 | Next.js 15 App Router | Fast, full-stack, SSE support out-of-box, easy Vercel deploy |
 | Claude models (Opus/Sonnet/Haiku) | User selects per debate: Opus for best reasoning, Sonnet for balanced, Haiku for speed/cost. Good at structured output (stances). |
-| Yahoo Finance REST API | Free, no key required, 25-second timeout protection, with 1-hour file caching |
+| Supabase (stock-predictor DB) | Centralized data source, shared with stock-predictor, 25-second timeout, 1-hour file caching, pagination support |
 | Markdown agents | Easy to edit (no code deploy), version-controllable, agents "speak" their philosophy |
 | Tailwind CSS | Fast styling, dark theme looks professional |
 | Server-Sent Events | Natural fit for streaming, simpler than WebSocket for this use case |

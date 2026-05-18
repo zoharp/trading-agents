@@ -6,6 +6,66 @@ import remarkGfm from 'remark-gfm';
 
 type EventKind = 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'final' | 'escalation' | 'error';
 
+function normForDedup(s: string): string {
+  return s
+    .replace(/\*\*/g, '').replace(/\*/g, '').replace(/^#+\s*/gm, '')
+    .toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// Only catches the specific model-restart pattern: a prefix repeats immediately on the same line.
+// e.g. "TSLA $400 CSP, June 18 TSLA $400 CSP, June 18 — more context"
+// Uses a high minLen (30) to avoid false positives in dense financial text.
+function deduplicateLine(line: string): string {
+  const minLen = 30;
+  if (line.length < minLen * 2) return line;
+  for (let checkLen = minLen; checkLen <= Math.floor(line.length / 2); checkLen++) {
+    const prefix = line.substring(0, checkLen);
+    const rest = line.substring(checkLen).trimStart();
+    if (rest.startsWith(prefix)) return deduplicateLine(rest);
+  }
+  return line;
+}
+
+// Conservative dedup: exact normalized line matching only.
+// No fuzzy/Jaccard — financial text shares too many terms and triggers false positives.
+function deduplicateText(text: string): string {
+  const lines = text.split('\n');
+  const seenNorm = new Set<string>();
+  const out: string[] = [];
+
+  for (const rawLine of lines) {
+    const line = deduplicateLine(rawLine);
+    const norm = normForDedup(line);
+    if (norm.length >= 30) {
+      if (seenNorm.has(norm)) continue;
+      seenNorm.add(norm);
+    }
+    out.push(line);
+  }
+
+  return out.join('\n');
+}
+
+interface MarketSnapshot {
+  symbol: string;
+  asOf: string;
+  price: number;
+  changePct: number;
+  volume: number;
+  avgVolume: number;
+  high52w: number;
+  low52w: number;
+  ema20: number;
+  sma50: number;
+  sma200: number;
+  rsi14: number;
+  macd: { macd: number; signal: number; hist: number };
+  bollinger: { upper: number; mid: number; lower: number; pctB: number };
+  atr14: number;
+  regime: string;
+  trendStructure: string;
+}
+
 interface Stance {
   stance: 'bullish' | 'bearish' | 'neutral' | 'unknown';
   conviction: number;
@@ -47,13 +107,17 @@ export default function Home() {
   const [resumeState, setResumeState] = useState<any>(null);
   const [debugInfo, setDebugInfo] = useState<{ systemPrompt: string; messages: any[] } | null>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [marketData, setMarketData] = useState<Record<string, MarketSnapshot> | null>(null);
+  const [currentQuery, setCurrentQuery] = useState<string>('');
+  const [allDebugInfo, setAllDebugInfo] = useState<Array<{ agent: string; round: number; systemPrompt: string; messages: any[] }>>([]);
 
   const abortRef = useRef<AbortController | null>(null);
   const userScrolledUp = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const turnIdRef = useRef(0);
+  const currentDebateCostRef = useRef(0);
 
-  // Load session cost total on mount
+  // Load historical session cost on mount (file total, not accumulating during this browser session)
   useEffect(() => {
     async function loadSessionCost() {
       try {
@@ -101,6 +165,9 @@ export default function Home() {
       setTurns([]);
       setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
       setCanResume(false);
+      currentDebateCostRef.current = 0;
+      setCurrentQuery(input.trim());
+      setAllDebugInfo([]);
     }
     userScrolledUp.current = false;
     turnIdRef.current = 0;
@@ -151,109 +218,238 @@ export default function Home() {
       setTurns(prev => prev.map(t => ({ ...t, done: true })));
       setRunning(false);
       abortRef.current = null;
-
-      // Reload session cost
-      async function reloadCost() {
-        try {
-          const res = await fetch('/api/debate-costs');
-          if (res.ok) {
-            const data = await res.json();
-            const total = data.costs?.reduce((sum: number, c: any) => sum + c.costUsd, 0) || 0;
-            setSessionCostTotal(total);
-          }
-        } catch {}
-      }
-      reloadCost();
+      // Accumulate this debate's cost into session total
+      setSessionCostTotal(prev => prev + currentDebateCostRef.current);
     }
-  }
-
-  function deduplicateText(text: string): string {
-    // Split into sentences (split on . ! ? followed by space)
-    const sentences = text.split(/(?<=[.!?])\s+/).filter(s => s.trim());
-    const seen = new Set<string>();
-    const deduped: string[] = [];
-
-    for (let i = 0; i < sentences.length; i++) {
-      const normalized = sentences[i].trim().toLowerCase();
-      // Skip if we've seen this exact sentence recently (within last 3 sentences)
-      let isDuplicate = false;
-      for (let j = Math.max(0, i - 3); j < i; j++) {
-        if (seen.has(sentences[j].trim().toLowerCase())) {
-          if (normalized === sentences[j].trim().toLowerCase()) {
-            isDuplicate = true;
-            break;
-          }
-        }
-      }
-      if (!isDuplicate) {
-        deduped.push(sentences[i]);
-        seen.add(normalized);
-      }
-    }
-
-    return deduped.join(' ');
   }
 
   function handleEvent(evt: any) {
     if (evt.type === 'debug') {
       setDebugInfo(evt.debug);
-      setShowDebug(true);
+      // Accumulate every turn's prompt for export (don't auto-open the panel)
+      setAllDebugInfo(prev => [...prev, {
+        agent: evt.agent || '?',
+        round: evt.round || 0,
+        systemPrompt: evt.debug.systemPrompt,
+        messages: evt.debug.messages,
+      }]);
       return;
     }
 
     if (evt.type === 'usage') {
-      // Update cost panel with token usage (calculate based on model)
       const pricing: Record<string, [number, number]> = {
         'claude-opus-4-7': [15, 75],
         'claude-sonnet-4-6': [3, 15],
         'claude-haiku-4-5-20251001': [0.8, 4],
       };
       const [inputPrice, outputPrice] = pricing[model] || [3, 15];
-      setCost({
-        inputTokens: evt.totalInputTokens,
-        outputTokens: evt.totalOutputTokens,
-        totalUsd: (evt.totalInputTokens * inputPrice + evt.totalOutputTokens * outputPrice) / 1_000_000,
-      });
+      const totalUsd = (evt.totalInputTokens * inputPrice + evt.totalOutputTokens * outputPrice) / 1_000_000;
+      currentDebateCostRef.current = totalUsd;
+      setCost({ inputTokens: evt.totalInputTokens, outputTokens: evt.totalOutputTokens, totalUsd });
+    }
+
+    if (evt.type === 'system' && evt.marketData) {
+      setMarketData(evt.marketData as Record<string, MarketSnapshot>);
     }
 
     setTurns(prev => {
-      const copy = [...prev];
       if (evt.type === 'system') {
-        copy.push({ kind: 'system', text: evt.text || '', done: true });
-      } else if (evt.type === 'turn-start' && evt.agent) {
-        copy.push({ kind: 'turn', agent: evt.agent, round: evt.round, text: '', done: false });
-      } else if (evt.type === 'token' && evt.agent) {
-        const last = copy[copy.length - 1];
-        if (last && last.agent === evt.agent && !last.done) {
-          last.text += evt.text || '';
-        }
-      } else if (evt.type === 'turn-end' && evt.stance) {
-        const last = copy[copy.length - 1];
-        if (last) {
-          last.done = true;
-          last.stance = evt.stance;
-          last.text = deduplicateText(last.text);
-          if (evt.resumeState) {
-            last.resumeState = evt.resumeState;
-            setResumeState(evt.resumeState);
-            setCanResume(true);
-          }
-        }
-      } else if (evt.type === 'round-summary' && evt.summary) {
-        copy.push({ kind: 'summary', round: evt.summary.round, text: '', done: true, summary: evt.summary });
-      } else if (evt.type === 'final') {
-        copy.push({ kind: 'final', text: deduplicateText(evt.text || ''), done: true });
-        setCanResume(false);
-        setResumeState(null);
-      } else if (evt.type === 'escalation') {
-        copy.push({ kind: 'escalation', text: deduplicateText(evt.text || ''), done: true });
-        setCanResume(false);
-        setResumeState(null);
-      } else if (evt.type === 'error') {
-        copy.push({ kind: 'system', text: `ERROR: ${evt.text}`, done: true });
+        return [...prev, { kind: 'system', text: evt.text || '', done: true }];
       }
-      return copy;
+      if (evt.type === 'turn-start' && evt.agent) {
+        return [...prev, { kind: 'turn', agent: evt.agent, round: evt.round, text: '', done: false }];
+      }
+      if (evt.type === 'token' && evt.agent) {
+        const idx = prev.length - 1;
+        const last = prev[idx];
+        if (!last || last.agent !== evt.agent || last.done) return prev;
+        // Create new object — never mutate; StrictMode calls updaters twice with same prev
+        return [...prev.slice(0, idx), { ...last, text: last.text + (evt.text || '') }];
+      }
+      if (evt.type === 'turn-end' && evt.stance) {
+        const idx = prev.length - 1;
+        const last = prev[idx];
+        if (!last) return prev;
+        const updated: Turn = { ...last, done: true, stance: evt.stance, text: deduplicateText(last.text) };
+        if (evt.resumeState) {
+          updated.resumeState = evt.resumeState;
+          setResumeState(evt.resumeState);
+          setCanResume(true);
+        }
+        return [...prev.slice(0, idx), updated];
+      }
+      if (evt.type === 'round-summary' && evt.summary) {
+        return [...prev, { kind: 'summary', round: evt.summary.round, text: '', done: true, summary: evt.summary }];
+      }
+      if (evt.type === 'final') {
+        setCanResume(false);
+        setResumeState(null);
+        // The final text was already streamed as an Elena turn bubble — remove it before adding the SpecialBubble
+        const last = prev[prev.length - 1];
+        const base = (last?.kind === 'turn' && last?.agent === 'Elena') ? prev.slice(0, -1) : prev;
+        return [...base, { kind: 'final', text: deduplicateText(evt.text || ''), done: true }];
+      }
+      if (evt.type === 'escalation') {
+        setCanResume(false);
+        setResumeState(null);
+        const last = prev[prev.length - 1];
+        const base = (last?.kind === 'turn' && last?.agent === 'Elena') ? prev.slice(0, -1) : prev;
+        return [...base, { kind: 'escalation', text: deduplicateText(evt.text || ''), done: true }];
+      }
+      if (evt.type === 'error') {
+        return [...prev, { kind: 'system', text: `ERROR: ${evt.text}`, done: true }];
+      }
+      return prev;
     });
+  }
+
+  function buildMarkdown(includePrompts = false): string {
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+    const lines: string[] = [];
+
+    lines.push(`# two.desk Debate Export`);
+    lines.push(`**Date:** ${now}  `);
+    lines.push(`**Question:** ${input}  `);
+    lines.push(`**Model:** ${model}  `);
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+
+    if (marketData && Object.keys(marketData).length > 0) {
+      lines.push('## Market Data');
+      lines.push('');
+      for (const s of Object.values(marketData)) {
+        lines.push(`### ${s.symbol}`);
+        lines.push(`**As of:** ${s.asOf}  `);
+        lines.push(`**Price:** $${s.price.toFixed(2)} (${s.changePct >= 0 ? '+' : ''}${s.changePct.toFixed(2)}%)  `);
+        lines.push(`**52w Range:** $${s.low52w} – $${s.high52w}  `);
+        lines.push('');
+        lines.push('| Indicator | Value |');
+        lines.push('|-----------|-------|');
+        lines.push(`| RSI (14) | ${s.rsi14} |`);
+        lines.push(`| MACD | ${s.macd.macd.toFixed(3)} |`);
+        lines.push(`| MACD Signal | ${s.macd.signal.toFixed(3)} |`);
+        lines.push(`| MACD Hist | ${s.macd.hist >= 0 ? '+' : ''}${s.macd.hist.toFixed(3)} |`);
+        lines.push(`| EMA20 | $${s.ema20} |`);
+        lines.push(`| SMA50 | $${s.sma50} |`);
+        lines.push(`| SMA200 | $${s.sma200} |`);
+        lines.push(`| BB Upper | $${s.bollinger.upper} |`);
+        lines.push(`| BB Mid | $${s.bollinger.mid} |`);
+        lines.push(`| BB Lower | $${s.bollinger.lower} |`);
+        lines.push(`| BB% | ${(s.bollinger.pctB * 100).toFixed(0)}% |`);
+        lines.push(`| ATR (14) | $${s.atr14} |`);
+        lines.push(`| Volume | ${s.volume?.toLocaleString() ?? 'n/a'} |`);
+        lines.push(`| Avg Vol (20d) | ${s.avgVolume?.toLocaleString() ?? 'n/a'} |`);
+        lines.push('');
+        lines.push(`**Regime:** ${s.regime}  `);
+        lines.push(`**Trend:** ${s.trendStructure}  `);
+        lines.push('');
+      }
+      lines.push('---');
+      lines.push('');
+    }
+
+    lines.push('## Debate Transcript');
+    lines.push('');
+
+    let currentRound = 0;
+    for (const turn of turns) {
+      if (turn.kind === 'system') {
+        lines.push(`> *${turn.text}*`);
+        lines.push('');
+      } else if (turn.kind === 'turn') {
+        if (turn.round && turn.round !== currentRound) {
+          currentRound = turn.round;
+          lines.push(`### Round ${currentRound}`);
+          lines.push('');
+        }
+        const label = turn.agent === 'Elena' ? '**Elena** *(mean reversion, lead)*' : '**Marcus** *(trend/momentum)*';
+        lines.push(`#### ${label}`);
+        lines.push('');
+        lines.push(turn.text);
+        lines.push('');
+        if (turn.stance) {
+          lines.push(`> **STANCE:** ${turn.stance.stance} | **CONVICTION:** ${turn.stance.conviction}/10 | **AGREE:** ${turn.stance.agree}`);
+          if (turn.stance.disagreement && turn.stance.disagreement !== 'none') {
+            lines.push(`> **KEY DISAGREEMENT:** ${turn.stance.disagreement}`);
+          }
+          lines.push('');
+        }
+      } else if (turn.kind === 'summary' && turn.summary) {
+        const s = turn.summary;
+        lines.push(`**Round ${s.round} Result:** ${s.consensus ? '✓ CONSENSUS REACHED' : `${s.agreementScore}% agreement`}`);
+        lines.push(`- Elena: ${s.elena.stance}, conviction ${s.elena.conviction}/10, ${s.elena.agree}`);
+        lines.push(`- Marcus: ${s.marcus.stance}, conviction ${s.marcus.conviction}/10, ${s.marcus.agree}`);
+        lines.push('');
+        lines.push('---');
+        lines.push('');
+      } else if (turn.kind === 'final') {
+        lines.push('## Final Recommendation');
+        lines.push('');
+        lines.push(turn.text);
+        lines.push('');
+      } else if (turn.kind === 'escalation') {
+        lines.push('## Escalation — No Consensus');
+        lines.push('');
+        lines.push(turn.text);
+        lines.push('');
+      }
+    }
+
+    lines.push('---');
+    lines.push('');
+    lines.push('## Cost');
+    lines.push('');
+    lines.push('| | Tokens | Cost |');
+    lines.push('|---|---|---|');
+    lines.push(`| Input | ${cost.inputTokens.toLocaleString()} | |`);
+    lines.push(`| Output | ${cost.outputTokens.toLocaleString()} | |`);
+    lines.push(`| **Total** | | **$${cost.totalUsd.toFixed(4)}** |`);
+    lines.push('');
+
+    if (includePrompts && allDebugInfo.length > 0) {
+      lines.push('---');
+      lines.push('');
+      lines.push('## Claude Prompts (All Turns)');
+      lines.push('');
+      for (const d of allDebugInfo) {
+        lines.push(`### ${d.agent} — Round ${d.round}`);
+        lines.push('');
+        lines.push('**System Prompt:**');
+        lines.push('');
+        lines.push('```');
+        lines.push(d.systemPrompt);
+        lines.push('```');
+        lines.push('');
+        lines.push('**Messages:**');
+        lines.push('');
+        for (const msg of d.messages) {
+          lines.push(`**[${msg.role.toUpperCase()}]**`);
+          lines.push('```');
+          lines.push(typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content, null, 2));
+          lines.push('```');
+          lines.push('');
+        }
+        lines.push('---');
+        lines.push('');
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  function downloadMarkdown(includePrompts = false) {
+    const md = buildMarkdown(includePrompts);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const ticker = marketData ? Object.keys(marketData).join('-') : 'debate';
+    const date = new Date().toISOString().split('T')[0];
+    const suffix = includePrompts ? '-with-prompts' : '';
+    a.href = url;
+    a.download = `two-desk-${ticker}-${date}${suffix}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -270,7 +466,7 @@ export default function Home() {
                 </h1>
                 <p className="text-sm text-[#888] mt-1">Marcus (trend) vs. Elena (mean-rev, lead) — they debate, you decide.</p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 items-center">
                 {running && (
                   <button
                     onClick={() => abortRef.current?.abort()}
@@ -316,6 +512,12 @@ export default function Home() {
               <div className="text-[#666] text-sm italic">
                 Ask about a ticker or setup. e.g.{' '}
                 <span className="text-[#d4a574]">"Should I take a swing long in NVDA here?"</span>
+              </div>
+            )}
+            {currentQuery && (turns.length > 0 || running) && (
+              <div className="bg-[#1a1610] border border-[#3a2e1a] rounded px-4 py-3">
+                <div className="text-[10px] text-[#888] uppercase font-bold mb-1">Your question</div>
+                <div className="text-sm text-[#e8c98a]">{currentQuery}</div>
               </div>
             )}
 
@@ -384,9 +586,34 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right sidebar: Cost panel + Debug */}
+        {/* Right sidebar: Market data + Cost panel + Debug */}
         <div className="w-96 shrink-0 flex flex-col gap-4">
-          <CostPanel cost={cost} sessionTotal={sessionCostTotal} />
+          {marketData && <MarketDataPanel data={marketData} />}
+          <CostPanel cost={cost} sessionTotal={sessionCostTotal + (running ? cost.totalUsd : 0)} />
+
+          {/* Export panel — always visible */}
+          <div className="bg-[#15151a] border border-[#2a2a2d] rounded p-4 space-y-2">
+            <div className="text-xs font-bold text-[#888] uppercase mb-3">Export</div>
+            <button
+              onClick={() => downloadMarkdown(false)}
+              disabled={turns.length === 0}
+              title="Download market data, full debate transcript, and cost summary"
+              className="w-full px-3 py-2 bg-[#1a1a1f] border border-[#2a2a2d] text-[#d8d6d1] hover:border-[#5ab884] hover:text-[#5ab884] font-bold text-xs rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-left"
+            >
+              ↓ Conversation <span className="font-normal text-[#666]">— transcript + market data</span>
+            </button>
+            <button
+              onClick={() => downloadMarkdown(true)}
+              disabled={turns.length === 0}
+              title="Includes full Claude system prompts and message arrays for every turn"
+              className="w-full px-3 py-2 bg-[#1a1a1f] border border-[#2a2a2d] text-[#d8d6d1] hover:border-[#7a9eaf] hover:text-[#7a9eaf] font-bold text-xs rounded transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-left"
+            >
+              ↓ Conversation + Prompts <span className="font-normal text-[#666]">— incl. all Claude input</span>
+            </button>
+            {turns.length === 0 && (
+              <div className="text-[10px] text-[#555] pt-1">Available after debate starts.</div>
+            )}
+          </div>
 
           {/* Debug toggle button */}
           <button
@@ -440,6 +667,7 @@ function ChatBubble({
   const isElena = agent === 'Elena';
   const bgColor = isElena ? 'bg-[#1a1a1f]' : 'bg-[#15151a]';
   const color = isElena ? 'text-[#7a9eaf]' : 'text-[#d4a574]';
+  const displayText = done ? deduplicateText(text) : text;
 
   return (
     <div className={`${bgColor} rounded p-3`}>
@@ -449,26 +677,30 @@ function ChatBubble({
         {!done && <span className="text-xs text-[#666] animate-pulse">▌</span>}
       </div>
       <div className="text-sm leading-relaxed text-[#d8d6d1]">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            code: ({ inline, children, ...props }: any) =>
-              inline ? (
-                <code className="bg-[#2a2a2d] px-1 rounded text-[#d4a574]">{children}</code>
-              ) : (
-                <pre className="bg-[#0a0a0b] p-2 rounded my-2 overflow-x-auto">
-                  <code>{children}</code>
-                </pre>
-              ),
-            h2: ({ children }) => <h2 className="font-bold text-[#e8e6e1] mt-3 mb-1">{children}</h2>,
-            h3: ({ children }) => <h3 className="font-bold text-[#d8d6d1] mt-2 mb-1">{children}</h3>,
-            strong: ({ children }) => <strong className="text-[#e8e6e1]">{children}</strong>,
-            ul: ({ children }) => <ul className="list-disc list-inside my-2">{children}</ul>,
-            li: ({ children }) => <li className="ml-2">{children}</li>,
-          }}
-        >
-          {text}
-        </ReactMarkdown>
+        {done ? (
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              code: ({ inline, children, ...props }: any) =>
+                inline ? (
+                  <code className="bg-[#2a2a2d] px-1 rounded text-[#d4a574]">{children}</code>
+                ) : (
+                  <pre className="bg-[#0a0a0b] p-2 rounded my-2 overflow-x-auto">
+                    <code>{children}</code>
+                  </pre>
+                ),
+              h2: ({ children }) => <h2 className="font-bold text-[#e8e6e1] mt-3 mb-1">{children}</h2>,
+              h3: ({ children }) => <h3 className="font-bold text-[#d8d6d1] mt-2 mb-1">{children}</h3>,
+              strong: ({ children }) => <strong className="text-[#e8e6e1]">{children}</strong>,
+              ul: ({ children }) => <ul className="list-disc list-inside my-2">{children}</ul>,
+              li: ({ children }) => <li className="ml-2">{children}</li>,
+            }}
+          >
+            {displayText}
+          </ReactMarkdown>
+        ) : (
+          <pre className="whitespace-pre-wrap font-sans text-sm text-[#d8d6d1] leading-relaxed">{displayText}</pre>
+        )}
       </div>
     </div>
   );
@@ -562,6 +794,71 @@ function RoundSummary({ summary }: { summary: { round: number; elena: Stance; ma
   );
 }
 
+function MarketDataPanel({ data }: { data: Record<string, MarketSnapshot> }) {
+  const tickers = Object.keys(data);
+  if (tickers.length === 0) return null;
+
+  return (
+    <div className="bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
+      <div className="text-xs font-bold text-[#888] uppercase">Market Data</div>
+      {tickers.map(ticker => {
+        const s = data[ticker];
+        const changeColor = s.changePct >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]';
+        const rsiColor = s.rsi14 > 70 ? 'text-[#d97474]' : s.rsi14 < 30 ? 'text-[#5ab884]' : 'text-[#d4a574]';
+        const macdColor = s.macd.hist >= 0 ? 'text-[#5ab884]' : 'text-[#d97474]';
+        const bbColor = s.bollinger.pctB > 1 ? 'text-[#d97474]' : s.bollinger.pctB < 0 ? 'text-[#5ab884]' : 'text-[#d8d6d1]';
+        const pricePct = s.high52w > s.low52w
+          ? Math.round(((s.price - s.low52w) / (s.high52w - s.low52w)) * 100)
+          : 50;
+
+        return (
+          <div key={ticker} className="space-y-2 pb-3 border-b border-[#2a2a2d] last:border-0 last:pb-0">
+            <div className="flex items-baseline gap-2">
+              <span className="font-bold text-[#e8e6e1] text-base">{s.symbol}</span>
+              <span className="text-[#d8d6d1]">${s.price.toFixed(2)}</span>
+              <span className={`text-xs font-bold ${changeColor}`}>
+                {s.changePct >= 0 ? '+' : ''}{s.changePct.toFixed(2)}%
+              </span>
+            </div>
+
+            {/* 52w range bar */}
+            <div className="space-y-1">
+              <div className="flex justify-between text-[10px] text-[#555]">
+                <span>${s.low52w}</span>
+                <span className="text-[#666]">52w range ({pricePct}%)</span>
+                <span>${s.high52w}</span>
+              </div>
+              <div className="relative h-1 bg-[#2a2a2d] rounded-full">
+                <div
+                  className="absolute top-0 w-2 h-1 bg-[#d4a574] rounded-full -ml-1"
+                  style={{ left: `${pricePct}%` }}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+              <div className="text-[#666]">RSI <span className={`${rsiColor} font-bold`}>{s.rsi14}</span></div>
+              <div className="text-[#666]">MACD <span className={`${macdColor} font-bold`}>{s.macd.hist >= 0 ? '+' : ''}{s.macd.hist.toFixed(2)}</span></div>
+              <div className="text-[#666]">EMA20 <span className="text-[#d8d6d1]">${s.ema20}</span></div>
+              <div className="text-[#666]">SMA50 <span className="text-[#d8d6d1]">${s.sma50}</span></div>
+              <div className="text-[#666]">SMA200 <span className="text-[#d8d6d1]">${s.sma200}</span></div>
+              <div className="text-[#666]">ATR <span className="text-[#d8d6d1]">${s.atr14}</span></div>
+              <div className="text-[#666]">BB% <span className={bbColor}>{(s.bollinger.pctB * 100).toFixed(0)}%</span></div>
+              <div className="text-[#666]">BB mid <span className="text-[#d8d6d1]">${s.bollinger.mid}</span></div>
+            </div>
+
+            <div className="text-[10px] text-[#555] leading-snug space-y-0.5">
+              <div>{s.regime}</div>
+              <div>{s.trendStructure}</div>
+              <div className="text-[#444]">as of {s.asOf}</div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function CostPanel({ cost, sessionTotal }: { cost: Cost; sessionTotal: number }) {
   return (
     <div className="sticky top-8 bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
@@ -585,7 +882,7 @@ function CostPanel({ cost, sessionTotal }: { cost: Cost; sessionTotal: number })
       <div className="border-t border-[#2a2a2d] pt-4">
         <div className="text-xs font-bold text-[#888] mb-2 uppercase">Session Total</div>
         <div>
-          <span className="text-[#888]">All debates:</span>
+          <span className="text-[#888]">Accumulated:</span>
           <span className="float-right text-[#5ab884] font-bold">${sessionTotal.toFixed(4)}</span>
         </div>
       </div>
