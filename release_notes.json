@@ -1,5 +1,14 @@
 [
   {
+    "version": "0.4.0",
+    "date": "2026-05-21",
+    "changes": [
+      "✨ **Follow-up questions** — After a final recommendation, type a follow-up to get Elena → Marcus → updated FINAL without refetching market data.",
+      "🔀 **Smart new-ticker detection** — Typing a different ticker after a final starts a fresh conversation automatically.",
+      "🐛 **Orchestrator syntax fix** — Fixed `async function await` syntax error introduced by linter; restored `fs`/`path` imports."
+    ]
+  },
+  {
     "version": "0.3.0",
     "date": "2026-05-21",
     "changes": [

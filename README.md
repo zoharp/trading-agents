@@ -15,6 +15,7 @@ Two opinionated trading agents debate your setup in real-time until they reach c
 - Markdown rendering (no raw tags visible)
 - Smart scroll that doesn't yank you away while reading
 - **Stop button** to halt mid-debate, **Resume button** to pick up where you left off (full context preserved)
+- **Follow-up questions** — after a final recommendation, ask a follow-up; agents do a mini 1-round discussion and produce an updated recommendation. Type a new ticker to start fresh instead.
 - Final recommendation or escalation (needs you to decide)
 - **Optimized for clarity** — Track debate progress at a glance instead of reading walls of text
 
@@ -201,7 +202,7 @@ For design rationale on debate efficiency, see **[DEBATE_STRUCTURE.md](./DEBATE_
 - **Market Data:** Supabase (stock-predictor database, 25-second timeout protection, 1-hour caching)
 - **Streaming:** Server-Sent Events (SSE)
 - **Hosting:** Vercel
-- **Cost persistence:** JSON file (`.cache/debate-costs.json`)
+- **Cost persistence:** Supabase `debate_costs` table
 
 ---
 
@@ -227,8 +228,8 @@ npx tsc --noEmit
 **Cost panel stuck at $0?**
 - Make sure debate is running. Cost updates as agents speak.
 - Check the Network tab in DevTools to see if usage events are streaming.
-- Costs are persisted to `.cache/debate-costs.json` — check that file exists after a debate completes.
-- Session total loads from that file on page mount.
+- Costs are persisted to the Supabase `debate_costs` table after each debate completes.
+- Session total loads from `/api/debate-costs` on page mount.
 
 **Market data fetch timing out?**
 - Yahoo Finance requests have a 25-second timeout. If this happens frequently, check your internet connection.

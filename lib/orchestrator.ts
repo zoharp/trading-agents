@@ -1,5 +1,7 @@
 import { streamAgent, ChatMessage, AgentChunk } from './claude';
 import { getTechnicalSnapshot, extractTickers, TechnicalSnapshot } from './market-data';
+import fs from 'fs';
+import path from 'path';
 
 const MAX_ROUNDS = 10;
 
@@ -14,7 +16,7 @@ function getCostUsd(inputTokens: number, outputTokens: number, model: string): n
   return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
 }
 
-async function await saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
+async function saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_KEY;
   if (!supabaseUrl || !supabaseKey) return;

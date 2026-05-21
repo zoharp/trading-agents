@@ -44,8 +44,8 @@ Production URL: `https://two-desk.vercel.app` (or your Vercel custom domain)
 
 ## Current versions
 
-- **Frontend:** `0.3.0`
-- **Backend:** `0.3.0`
+- **Frontend:** `0.4.0`
+- **Backend:** `0.4.0`
 - **Data Integration:** Supabase (stock-predictor) — live since May 17, 2026
 
 ---
@@ -258,6 +258,8 @@ The response is SSE (text/event-stream). Each line is a JSON event:
   - **↓ Conversation + Prompts** — same plus all Claude system prompts and message arrays
 - **Debug panel:** Toggle to view exact system prompt and message array sent to each agent
 - **Smart scroll:** Page only auto-scrolls to bottom if you're already near the bottom; won't yank you away while reading
+- **Follow-up questions:** After a FINAL or ESCALATION, type a follow-up in the input bar — runs a mini 1-round debate (Elena → Marcus → Elena writes updated FINAL) without refetching market data. Typing a **new ticker** starts a fresh conversation instead.
+- **Follow-up card:** Blue-tinted "Your follow-up" card separates each follow-up thread in the feed. Multiple chained follow-ups work.
 - **Final/Escalation boxes:** Styled full-width boxes (green for consensus, red for tie-breaker)
 
 ---
@@ -439,6 +441,9 @@ Never pass raw `JSON.stringify(snapshot)` to agents — it was ~630 tokens/ticke
 
 ### Debate early exit (no ticker)
 After each round, if both agents have `conviction === 0`, the orchestrator immediately yields an escalation with "MISSING DATA" and exits. Prevents wasted rounds where agents loop asking for the ticker.
+
+### Follow-up mode
+After `final`/`escalation`, the event includes a `resumeState` with the full transcript saved as `followUpState` in the frontend. On next submit, `extractTickersFrontend()` checks for a new ticker vs. same/none: new ticker → clear state and run fresh debate; same/no ticker → call `runFollowUp()` in `orchestrator.ts`. Follow-up flow: Elena responds (prior transcript + follow-up question in sharedContext) → Marcus responds → Elena writes updated FINAL. Feed appends without resetting. Each FINAL event carries a fresh `resumeState` enabling chained follow-ups. Costs are reset per follow-up exchange.
 
 ---
 
