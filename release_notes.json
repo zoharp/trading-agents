@@ -1,0 +1,22 @@
+[
+  {
+    "version": "0.3.0",
+    "date": "2026-05-21",
+    "changes": [
+      "✨ **Login screen** — password-protected entry page with dark-themed UI matching the app style.",
+      "✨ **Hardened session secret** — AUTH_SECRET is a random 64-char hex token, httpOnly cookie, secure in production.",
+      "✨ **Cost tracking to Supabase** — debate costs now persisted to `debate_costs` table instead of a local file, works on Vercel.",
+      "🐛 **Agent files on Vercel** — added `outputFileTracingIncludes` so `agents/` and `profile/` are bundled into the serverless function (fixes ENOENT crash)."
+    ]
+  },
+  {
+    "version": "0.2.0",
+    "date": "2026-05-17",
+    "changes": [
+      "✨ **Supabase data pipeline** — market data sourced from stock-predictor Supabase DB instead of Yahoo Finance.",
+      "✨ **Slow data panel** — earnings, analyst targets, put/call ratio, short interest, insider activity, Google Trends, alpha vs SPY/sector, support/resistance.",
+      "✨ **Debate UI redesign** — chat-style layout, cost panel, markdown rendering, smart scroll, token tracking, stop/resume buttons.",
+      "⚡ **Market data format** — formatSnapshot() reduces token cost ~75% (630 → 150 tokens per ticker)."
+    ]
+  }
+]

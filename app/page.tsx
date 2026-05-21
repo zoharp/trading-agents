@@ -4,6 +4,64 @@ import { useState, useRef, useEffect, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+const APP_VERSION = '0.3.0';
+
+interface ReleaseNote { version: string; date: string; changes: string[] }
+
+function ChangelogModal({ onClose }: { onClose: () => void }) {
+  const [notes, setNotes] = useState<ReleaseNote[]>([]);
+
+  useEffect(() => {
+    fetch('/api/release-notes').then(r => r.json()).then(setNotes);
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: 'rgba(0,0,0,0.7)' }}
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-lg border border-[#2a2a2d]"
+        style={{ background: '#111114', padding: '28px 32px' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <span className="text-[#d4a574] font-bold text-lg">two</span>
+            <span className="text-[#7a9eaf] font-bold text-lg">.desk</span>
+            <span className="text-[#555] text-sm ml-3">changelog</span>
+          </div>
+          <button onClick={onClose} className="text-[#555] hover:text-[#aaa] text-xl leading-none">✕</button>
+        </div>
+
+        {notes.length === 0 && <p className="text-[#555] text-sm">Loading…</p>}
+
+        {notes.map((note) => (
+          <div key={note.version} className="mb-7">
+            <div className="flex items-baseline gap-3 mb-3">
+              <span className="text-[#e8c97a] font-bold font-mono">v{note.version}</span>
+              <span className="text-[#444] text-xs">{note.date}</span>
+            </div>
+            <ul className="space-y-2">
+              {note.changes.map((change, i) => (
+                <li key={i} className="text-[#c8c6c1] text-sm leading-relaxed">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{ p: ({ children }) => <span>{children}</span> }}
+                  >
+                    {change}
+                  </ReactMarkdown>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 type EventKind = 'system' | 'turn-start' | 'token' | 'turn-end' | 'usage' | 'final' | 'escalation' | 'error';
 
 function normForDedup(s: string): string {
@@ -177,6 +235,7 @@ export default function Home() {
   const [input, setInput] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [running, setRunning] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
   const [cost, setCost] = useState<Cost>({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
   const [sessionCostTotal, setSessionCostTotal] = useState<number>(0);
   const [model, setModel] = useState<string>('claude-haiku-4-5-20251001');
@@ -575,16 +634,25 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-[#0a0a0b] text-[#e8e6e1]">
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
       <div className="flex gap-6 px-6 py-8 max-w-full mx-auto">
         {/* Main debate area */}
         <div className="flex-1 min-w-0">
           <header className="border-b border-[#2a2a2d] pb-6 mb-6">
             <div className="flex justify-between items-start mb-4">
               <div>
-                <h1 className="text-3xl font-bold tracking-tight">
-                  <span className="text-[#d4a574]">two</span>
-                  <span className="text-[#7a9eaf]">.desk</span>
-                </h1>
+                <div className="flex items-baseline gap-3">
+                  <h1 className="text-3xl font-bold tracking-tight">
+                    <span className="text-[#d4a574]">two</span>
+                    <span className="text-[#7a9eaf]">.desk</span>
+                  </h1>
+                  <button
+                    onClick={() => setShowChangelog(true)}
+                    className="text-xs text-[#555] hover:text-[#e8c97a] font-mono transition-colors"
+                  >
+                    v{APP_VERSION}
+                  </button>
+                </div>
                 <p className="text-sm text-[#888] mt-1">Marcus (trend) vs. Elena (mean-rev, lead) — they debate, you decide.</p>
               </div>
               <div className="flex gap-2 items-center">

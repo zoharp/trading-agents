@@ -3,6 +3,7 @@ const nextConfig = {
   experimental: {
     outputFileTracingIncludes: {
       '/api/debate': ['./agents/**/*', './profile/**/*'],
+      '/api/release-notes': ['./release_notes.json'],
     },
   },
   webpack: (config, { isServer }) => {

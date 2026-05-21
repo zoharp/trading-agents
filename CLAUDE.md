@@ -44,8 +44,8 @@ Production URL: `https://two-desk.vercel.app` (or your Vercel custom domain)
 
 ## Current versions
 
-- **Frontend:** `0.2.0`
-- **Backend:** `0.2.0`
+- **Frontend:** `0.3.0`
+- **Backend:** `0.3.0`
 - **Data Integration:** Supabase (stock-predictor) — live since May 17, 2026
 
 ---
@@ -92,6 +92,18 @@ When data is > 1 hour old, could query stock-predictor's `/api/stock/<ticker>/re
 This would give Elena & Marcus much richer pre-calculated context instead of just OHLCV, accelerating debate and improving conviction confidence.
 
 **See also:** [stock-predictor PROJECT_SUMMARY.md](../stock-predictor/stock-predictor/PROJECT_SUMMARY.md) for complete architecture.
+
+---
+
+## Release Management
+
+Versions follow semver. After every change:
+1. Bump version in `CLAUDE.md` → `Current versions`
+2. Prepend entry to `release_notes.json` (icon + **bold label** — detail)
+3. Update `SCHEMA.md` if any DB tables/columns changed
+4. The `v{version}` badge in the UI reads from `release_notes.json` via `/api/release-notes`
+
+See `release_notes.json` for full history. See `SCHEMA.md` for DB schema.
 
 ---
 
@@ -240,6 +252,7 @@ The response is SSE (text/event-stream). Each line is a JSON event:
   - **Current Debate:** Input/output tokens and USD cost (updates in real-time via ref accumulation)
   - **Session Total:** Cumulative cost across all debates in this session (ref-accumulated, not re-read from file)
   - Model-specific pricing: Opus ($15/$75), Sonnet ($3/$15), Haiku ($0.80/$4) per 1M tokens
+- **Version badge + changelog modal:** `v0.3.0` badge next to the title — click to open a modal listing all releases from `release_notes.json`. Modal shows version, date, and change list with markdown rendering.
 - **Export panel:** Always-visible sidebar section, two buttons:
   - **↓ Conversation** — transcript + market data as Markdown file
   - **↓ Conversation + Prompts** — same plus all Claude system prompts and message arrays
