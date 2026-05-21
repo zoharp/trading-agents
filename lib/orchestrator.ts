@@ -1,7 +1,5 @@
 import { streamAgent, ChatMessage, AgentChunk } from './claude';
 import { getTechnicalSnapshot, extractTickers, TechnicalSnapshot } from './market-data';
-import fs from 'fs';
-import path from 'path';
 
 const MAX_ROUNDS = 10;
 
@@ -16,31 +14,31 @@ function getCostUsd(inputTokens: number, outputTokens: number, model: string): n
   return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
 }
 
-function saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
+async function await saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_KEY;
+  if (!supabaseUrl || !supabaseKey) return;
+
+  const costUsd = getCostUsd(inputTokens, outputTokens, model);
   try {
-    const costFile = path.join(process.cwd(), '.cache', 'debate-costs.json');
-    const dir = path.dirname(costFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-
-    let costs: any[] = [];
-    if (fs.existsSync(costFile)) {
-      costs = JSON.parse(fs.readFileSync(costFile, 'utf-8'));
-    }
-
-    const costUsd = getCostUsd(inputTokens, outputTokens, model);
-    costs.push({
-      timestamp: new Date().toISOString(),
-      ticker,
-      rounds,
-      inputTokens,
-      outputTokens,
-      costUsd,
-      model,
+    await fetch(`${supabaseUrl}/rest/v1/debate_costs`, {
+      method: 'POST',
+      headers: {
+        apikey: supabaseKey,
+        Authorization: `Bearer ${supabaseKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        timestamp: new Date().toISOString(),
+        ticker,
+        rounds,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        cost_usd: costUsd,
+        model,
+      }),
     });
-
-    fs.writeFileSync(costFile, JSON.stringify(costs, null, 2));
   } catch (e) {
     console.error('Failed to save debate cost:', e);
   }
@@ -373,7 +371,7 @@ ${marketBlock}
       // --- Blocked check: both agents have conviction 0 — missing data, can't proceed ---
       if (lastElena.conviction === 0 && lastMarcus.conviction === 0) {
         yield { type: 'system', text: 'Both agents are blocked — no ticker or critical data missing. Stopping debate.' };
-        saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
+        await saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
         yield {
           type: 'escalation',
           text: '## ESCALATION — MISSING DATA\n\nBoth agents cannot proceed without a specific ticker and current price.\n\n**What they need:**\n- Which instrument? (e.g. TSLA, SPY, NVDA)\n- Current price or price level you\'re analyzing\n- Timeframe (daily, weekly?)\n\nPlease resubmit with a ticker symbol.',
@@ -409,7 +407,7 @@ ${marketBlock}
         }
         transcript.push({ speaker: 'Elena', text: finalText });
         const finalResumeState: ResumeState = { transcript, round: round + 2, lastElena, lastMarcus };
-        saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
+        await saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
         yield { type: 'final', text: finalText, resumeState: finalResumeState };
         return;
       }
@@ -444,7 +442,7 @@ ${marketBlock}
       }
     }
     const escResumeState: ResumeState = { transcript, round: MAX_ROUNDS + 1, lastElena, lastMarcus };
-    saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
+    await saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
     yield { type: 'escalation', text: escText, resumeState: escResumeState };
 
   } catch (e: any) {
@@ -604,7 +602,7 @@ Note: A final recommendation was already reached in the previous debate. The use
     transcript.push({ speaker: 'Elena', text: finalText });
     const newResumeState: ResumeState = { transcript, round: followUpRound + 2, lastElena: elenaStance, lastMarcus: marcusStance };
     const tickers = extractTickers(originalRequest);
-    saveDebateCost(tickers.join(',') || 'unknown', followUpRound, cumulative.input, cumulative.output, model);
+    await saveDebateCost(tickers.join(',') || 'unknown', followUpRound, cumulative.input, cumulative.output, model);
     yield { type: 'final', text: finalText, resumeState: newResumeState };
 
   } catch (e: any) {
