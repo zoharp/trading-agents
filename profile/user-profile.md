@@ -19,10 +19,18 @@
   1. **Credit Spreads**  — Index spreads (SPY/SPX/QQQ) + high-liquidity single stocks. 30-45 DTE, delta 0.15-0.20, $5-wide wings.
   2. **Covered Calls**  — Monetize existing holdings; secondary to spread income.
   3. **Cash-Secured Puts** — Entry strategy on stocks wanting to buy.
+  4. **Leaps** - sually for short term, and sometimes hedge them with covered call
 
 ---
 
 ## HARD RULES (Non-Negotiable — Agent Must Enforce)
+
+### Rule 1: Strict Stock Selection Criteria Before trading
+a stock must meet four core criteria to ensure it is safe to hold long-term:
+1. **Technical Edge**: The stock must have a strong, upward-trending chart for at least the past 1.5 years.
+2. **Valuation**: It should have a positive Price-to-Earnings (P/E) ratio, ideally under 100.
+3. **Premium Yield**: The stock's options must pay well. Specifically, a 30-delta put option expiring in 30 days should yield at least 2.5% in premium.
+4. **Reliability**: The company cannot have a history of missing two consecutive earnings reports.
 
 ### Rule 1: 2x Stop on ALL Credit Spreads
 - **Trigger**: Set GTC buy-to-close at **2x the credit received** the moment trade opens
@@ -47,26 +55,22 @@ Close position when EITHER condition is met (whichever first):
 
 **Why**: Last 20-25% of premium takes longest to decay; exposes to reversal risk for minimal gain. Positions under $100 aren't worth the broker fee + time.
 
-### Rule 4: NO Covered Calls on Growth Holdings
-Do NOT sell covered calls on: **HOOD, TSLA, PLTR, SOFI, or any high-conviction recovery stock**
+### Rule 4: Covered Calls on Growth Holdings
+Covered calls on growth holdings (such as PLTR, HOOD, SOFI, TSLA) is risky, so make sure to do it:
+1. short term - 7-14 days
+2. Be ready to roll. 
+3. do it in the right timing - not when the stockis clsoe to support, 
+4. Do it on 30%-50% of the underlying assets
+5. Aviod selling below purchase price. If you do - b ready to roll
+6. Look for increasing implied volatility
+7. Avid selling CC through earnings
 
 These are held for big moves — CCs cap exactly those moves while keeping full downside. The $200-300 premium is NOT worth giving up a $5,000-10,000 recovery.
 
-### Rule 5: Never Sell CCs Through Earnings
-If CC expiration falls before or during earnings, either:
-- Close the CC 2 days before earnings, OR
-- Roll CC out past earnings before event
-
-**Why**: HOOD jumped $69→$83 in 4 days pre-earnings. Z had $80 CC expiring May 1 with earnings Apr 28 — forced buyback at large loss.
-
-### Rule 6: Stop Type Selection
-- **Stop-Market**: Use when gap risk is high (earnings approaching, volatile stock, tight OTM cushion). Guarantees exit but may fill worse.
-- **Stop-Limit**: Use when strike is well OTM (13%+) and no imminent catalyst. Set limit $0.20 above trigger for fill room.
-
-### Rule 7: Cash-Secured Puts Only on Genuine Entry Points
-Never sell CSP on a stock you don't genuinely want to own at the strike price. Premium is a bonus for waiting, not the primary reason.
-
-**If assignment happens**: Be ready to hold long-term OR transition to wheel (sell calls against new position).
+### Rule 5: Cash-Secured Puts Only on Genuine Entry Points
+1. Never sell CSP on a stock you don't genuinely want to own at the strike price.
+2. Delat < 0.3 unless you really want to get assigned
+3. 
 
 ---
 

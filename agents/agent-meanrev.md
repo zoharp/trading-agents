@@ -50,5 +50,22 @@ KEY_DISAGREEMENT: <one sentence, or "none">
 **When consensus is reached** → write `## FINAL RECOMMENDATION` and skip the stance block.
 Include: Action · Direction · Conviction · Entry zone · Stop · Target(s) · Position sizing · Key risks · What invalidates the thesis.
 
+### Trade Suggestion Format
+When recommending a new trade, agent provides (if applicable):
+```
+Ticker/Instrument: SPY 555/550 Put Spread
+Action: SELL (credit spread)
+Entry Price: $1.50 credit
+Stop-Loss: Buy-to-close at $3.00 (2x stop)
+Profit Target: Close at $0.37 (75% of $1.50)
+Max Risk: $500 ($5-wide spread)
+DTE: 42 days
+Edge Score: [Z's tool result]
+Earnings Risk: None in next 45 days
+Rationale: IV rank at 65%; theta decay optimal in 40-45 DTE window. Your target 3-5%/mo — this is $150 profit on $500 risk = 30% return toward monthly goal.
+Warnings: Earnings in 47 days (safe). Monitor if VIX drops below 15 (retreat to safer deltas).
+GO/NO-GO: [Agent recommendation + Z's confirmation needed]
+```
+
 **When max rounds hit without consensus** → write `## ESCALATION — USER INPUT NEEDED` and skip the stance block.
 Include: Both theses · Core disagreement · What specific information would resolve it.

@@ -135,7 +135,7 @@ interface Stance {
 }
 
 interface Turn {
-  kind: 'system' | 'turn' | 'summary' | 'final' | 'escalation';
+  kind: 'system' | 'turn' | 'summary' | 'final' | 'escalation' | 'followup';
   agent?: 'Elena' | 'Marcus';
   round?: number;
   text: string;
@@ -157,6 +157,22 @@ interface Cost {
   totalUsd: number;
 }
 
+function extractTickersFrontend(text: string): string[] {
+  const dollarTickers = Array.from(text.matchAll(/\$([A-Z]{1,5})\b/g)).map(m => m[1]);
+  const bareTickers = Array.from(text.matchAll(/\b([A-Z]{2,5})\b/g)).map(m => m[1]);
+  const stopwords = new Set([
+    'I', 'A', 'THE', 'AND', 'OR', 'BUT', 'IF', 'IT', 'IS', 'TO', 'FOR', 'AT', 'IN', 'ON', 'MY', 'ME', 'WE',
+    'BUY', 'SELL', 'HOLD', 'LONG', 'SHORT', 'STOP', 'TP', 'SL', 'ENTER', 'EXIT',
+    'USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'YTD', 'MTD', 'QTD', 'EOD', 'EOW',
+    'CSP', 'CC', 'PMR', 'PCS', 'CCS', 'BPS', 'BCS', 'PMCC', 'IC', 'ICS', 'BWB', 'RWB',
+    'PUT', 'CALL', 'ITM', 'OTM', 'ATM', 'DTE', 'IV', 'HV', 'RV', 'VIX', 'EXP',
+    'SMA', 'EMA', 'RSI', 'MACD', 'ATR', 'BB', 'OBV', 'CMF', 'MFI', 'ADX', 'ROC',
+    'PM', 'AH', 'AM', 'NOW', 'NEW', 'OLD', 'HIGH', 'LOW', 'MID', 'MAX', 'MIN',
+  ]);
+  const all = [...dollarTickers, ...bareTickers.filter(t => !stopwords.has(t))];
+  return Array.from(new Set(all));
+}
+
 export default function Home() {
   const [input, setInput] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -166,6 +182,7 @@ export default function Home() {
   const [model, setModel] = useState<string>('claude-haiku-4-5-20251001');
   const [canResume, setCanResume] = useState<boolean>(false);
   const [resumeState, setResumeState] = useState<any>(null);
+  const [followUpState, setFollowUpState] = useState<any>(null);
   const [debugInfo, setDebugInfo] = useState<{ systemPrompt: string; messages: any[] } | null>(null);
   const [showDebug, setShowDebug] = useState<boolean>(false);
   const [marketData, setMarketData] = useState<Record<string, MarketSnapshot> | null>(null);
@@ -221,29 +238,63 @@ export default function Home() {
 
   async function submit() {
     if (!input.trim() || running) return;
-    setRunning(true);
-    if (!resumeState) {
-      setTurns([]);
-      setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
-      setCanResume(false);
-      currentDebateCostRef.current = 0;
-      setCurrentQuery(input.trim());
-      setAllDebugInfo([]);
+
+    // Determine mode: follow-up, resume, or fresh
+    let mode: 'fresh' | 'resume' | 'followup' = 'fresh';
+    if (resumeState) {
+      mode = 'resume';
+    } else if (followUpState) {
+      const currentTickers = Object.keys(marketData || {});
+      const newTickers = extractTickersFrontend(input.trim());
+      const hasNewTicker = newTickers.length > 0 && newTickers.some(t => !currentTickers.includes(t));
+      mode = hasNewTicker ? 'fresh' : 'followup';
     }
+
+    setRunning(true);
+
+    if (mode === 'followup') {
+      // Append follow-up card; keep existing turns and market data
+      setTurns(prev => [...prev, { kind: 'followup' as const, text: input.trim(), done: true }]);
+      setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
+      currentDebateCostRef.current = 0;
+    } else {
+      // Fresh or resume
+      if (mode === 'fresh') {
+        setTurns([]);
+        setCost({ inputTokens: 0, outputTokens: 0, totalUsd: 0 });
+        setCanResume(false);
+        currentDebateCostRef.current = 0;
+        setCurrentQuery(input.trim());
+        setAllDebugInfo([]);
+        setFollowUpState(null);
+      }
+    }
+
     userScrolledUp.current = false;
     turnIdRef.current = 0;
 
     const controller = new AbortController();
     abortRef.current = controller;
 
+    let requestBody: Record<string, any>;
+    if (mode === 'followup') {
+      requestBody = {
+        request: input.trim(),
+        model,
+        followUp: true,
+        originalRequest: currentQuery,
+        followUpTranscript: followUpState,
+      };
+    } else if (mode === 'resume') {
+      requestBody = { request: `Continue debate: ${input}`, model, resumeFrom: resumeState };
+    } else {
+      requestBody = { request: input, model };
+    }
+
     const res = await fetch('/api/debate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        request: resumeState ? `Continue debate: ${input}` : input,
-        model,
-        resumeFrom: resumeState,
-      }),
+      body: JSON.stringify(requestBody),
       signal: controller.signal,
     });
 
@@ -345,6 +396,7 @@ export default function Home() {
       if (evt.type === 'final') {
         setCanResume(false);
         setResumeState(null);
+        if (evt.resumeState) setFollowUpState(evt.resumeState);
         // The final text was already streamed as an Elena turn bubble — remove it before adding the SpecialBubble
         const last = prev[prev.length - 1];
         const base = (last?.kind === 'turn' && last?.agent === 'Elena') ? prev.slice(0, -1) : prev;
@@ -353,6 +405,7 @@ export default function Home() {
       if (evt.type === 'escalation') {
         setCanResume(false);
         setResumeState(null);
+        if (evt.resumeState) setFollowUpState(evt.resumeState);
         const last = prev[prev.length - 1];
         const base = (last?.kind === 'turn' && last?.agent === 'Elena') ? prev.slice(0, -1) : prev;
         return [...base, { kind: 'escalation', text: deduplicateText(evt.text || ''), done: true }];
@@ -443,6 +496,13 @@ export default function Home() {
         lines.push(`- Marcus: ${s.marcus.stance}, conviction ${s.marcus.conviction}/10, ${s.marcus.agree}`);
         lines.push('');
         lines.push('---');
+        lines.push('');
+      } else if (turn.kind === 'followup') {
+        lines.push('---');
+        lines.push('');
+        lines.push(`### User Follow-up`);
+        lines.push('');
+        lines.push(turn.text);
         lines.push('');
       } else if (turn.kind === 'final') {
         lines.push('## Final Recommendation');
@@ -615,6 +675,13 @@ export default function Home() {
                   result.push(
                     <SpecialBubble key={`special-${result.length}`} kind={turn.kind} text={turn.text} />
                   );
+                } else if (turn.kind === 'followup') {
+                  result.push(
+                    <div key={`followup-${result.length}`} className="bg-[#12151e] border border-[#2a3a5a] rounded px-4 py-3 mt-2">
+                      <div className="text-[10px] text-[#7a9eaf] uppercase font-bold mb-1">Your follow-up</div>
+                      <div className="text-sm text-[#b8c8d8]">{turn.text}</div>
+                    </div>
+                  );
                 }
               }
               return result;
@@ -627,7 +694,7 @@ export default function Home() {
               value={input}
               onChange={e => setInput(e.target.value)}
               disabled={running}
-              placeholder="What do you want the desk to look at?"
+              placeholder={followUpState ? "Ask a follow-up... or type a new ticker to start fresh" : "What do you want the desk to look at?"}
               rows={2}
               className="flex-1 bg-[#15151a] border border-[#2a2a2d] rounded px-3 py-2 text-sm focus:outline-none focus:border-[#d4a574] disabled:opacity-50 resize-none"
               onKeyDown={e => {

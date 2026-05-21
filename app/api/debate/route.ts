@@ -1,11 +1,11 @@
-import { runDebate, ResumeState } from '@/lib/orchestrator';
+import { runDebate, runFollowUp, ResumeState } from '@/lib/orchestrator';
 import { NextRequest } from 'next/server';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300; // 5 minutes for the debate
 
 export async function POST(req: NextRequest) {
-  const { request: userRequest, model = 'claude-sonnet-4-6', resumeFrom } = await req.json();
+  const { request: userRequest, model = 'claude-sonnet-4-6', resumeFrom, followUp, originalRequest, followUpTranscript } = await req.json();
   if (!userRequest || typeof userRequest !== 'string') {
     return new Response('Missing request', { status: 400 });
   }
@@ -14,7 +14,10 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        for await (const event of runDebate(userRequest, req.signal, model, resumeFrom as ResumeState | undefined)) {
+        const generator = followUp && followUpTranscript
+          ? runFollowUp(userRequest, followUpTranscript as ResumeState, originalRequest || userRequest, req.signal, model)
+          : runDebate(userRequest, req.signal, model, resumeFrom as ResumeState | undefined);
+        for await (const event of generator) {
           const data = `data: ${JSON.stringify(event)}\n\n`;
           controller.enqueue(encoder.encode(data));
         }

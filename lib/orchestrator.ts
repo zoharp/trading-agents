@@ -377,6 +377,7 @@ ${marketBlock}
         yield {
           type: 'escalation',
           text: '## ESCALATION — MISSING DATA\n\nBoth agents cannot proceed without a specific ticker and current price.\n\n**What they need:**\n- Which instrument? (e.g. TSLA, SPY, NVDA)\n- Current price or price level you\'re analyzing\n- Timeframe (daily, weekly?)\n\nPlease resubmit with a ticker symbol.',
+          resumeState: { transcript, round, lastElena, lastMarcus },
         };
         return;
       }
@@ -406,8 +407,10 @@ ${marketBlock}
             yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
           }
         }
+        transcript.push({ speaker: 'Elena', text: finalText });
+        const finalResumeState: ResumeState = { transcript, round: round + 2, lastElena, lastMarcus };
         saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
-        yield { type: 'final', text: finalText };
+        yield { type: 'final', text: finalText, resumeState: finalResumeState };
         return;
       }
     }
@@ -440,8 +443,9 @@ ${marketBlock}
         yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
       }
     }
+    const escResumeState: ResumeState = { transcript, round: MAX_ROUNDS + 1, lastElena, lastMarcus };
     saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
-    yield { type: 'escalation', text: escText };
+    yield { type: 'escalation', text: escText, resumeState: escResumeState };
 
   } catch (e: any) {
     let msg: string = e?.message || 'Unknown error';
@@ -452,6 +456,164 @@ ${marketBlock}
       else if (parsed?.message) msg = parsed.message;
     } catch {}
     // Also handle structured error objects
+    if (e?.error?.message) msg = `API error: ${e.error.message}`;
+    yield { type: 'error', text: msg };
+  }
+}
+
+export async function* runFollowUp(
+  followUpQuestion: string,
+  previousState: ResumeState,
+  originalRequest: string,
+  signal?: AbortSignal,
+  model: string = 'claude-haiku-4-5-20251001',
+): AsyncGenerator<DebateEvent> {
+  try {
+    const cumulative = { input: 0, output: 0 };
+
+    const elenaPersona = loadFile('agents/agent-meanrev.md');
+    const marcusPersona = loadFile('agents/agent-trend.md');
+    const userProfile = loadFile('profile/user-profile.md');
+
+    const sharedContext = `
+## USER PROFILE
+${userProfile}
+
+## ORIGINAL USER REQUEST
+${originalRequest}
+
+## USER FOLLOW-UP QUESTION
+${followUpQuestion}
+
+Note: A final recommendation was already reached in the previous debate. The user is asking a follow-up question. Market data and technical analysis were discussed in the prior debate; build on that context.
+`.trim();
+
+    const transcript = [...previousState.transcript];
+    const followUpRound = previousState.round;
+
+    const buildMessages = (forAgent: 'Elena' | 'Marcus'): ChatMessage[] => {
+      const msgs: ChatMessage[] = [{ role: 'user', content: sharedContext }];
+
+      const FULL_WINDOW = 6;
+      const older = transcript.slice(0, Math.max(0, transcript.length - FULL_WINDOW));
+      const recent = transcript.slice(-FULL_WINDOW);
+
+      if (older.length > 0) {
+        const summary = older.map(e => {
+          const stanceMatch = e.text.match(/STANCE:\s*(\w+).*?CONVICTION:\s*(\d+).*?AGREE_WITH_PARTNER:\s*(\w+)/s);
+          if (stanceMatch) {
+            return `[${e.speaker} — earlier: stance=${stanceMatch[1]}, conviction=${stanceMatch[2]}, agree=${stanceMatch[3]}]`;
+          }
+          return `[${e.speaker} — earlier turn (summarized)]`;
+        }).join('\n');
+        msgs.push({ role: 'user', content: `Previous rounds summary:\n${summary}` });
+        msgs.push({ role: 'assistant', content: 'Understood. I will build on those prior positions.' });
+      }
+
+      for (const entry of recent) {
+        if (entry.speaker === forAgent) {
+          msgs.push({ role: 'assistant', content: entry.text });
+        } else {
+          msgs.push({ role: 'user', content: `[${entry.speaker} said]:\n${entry.text}` });
+        }
+      }
+
+      if (msgs[msgs.length - 1].role === 'assistant') {
+        msgs.push({ role: 'user', content: 'Address the user\'s follow-up question.' });
+      }
+      return msgs;
+    };
+
+    yield { type: 'system', text: `Follow-up: "${followUpQuestion}"` };
+
+    // --- Elena responds to follow-up ---
+    yield { type: 'turn-start', agent: 'Elena', round: followUpRound };
+    const elenaSystem = `${elenaPersona}\n\n## FOLLOW-UP MODE\nA final recommendation was already reached. The user has a follow-up question. Address it directly, referencing the prior debate and Marcus\'s position. After Marcus responds, you will write an updated FINAL RECOMMENDATION.`;
+
+    const elenaMessages = buildMessages('Elena');
+    yield { type: 'debug', agent: 'Elena', round: followUpRound, debug: { systemPrompt: elenaSystem, messages: elenaMessages } };
+
+    let elenaText = '';
+    for await (const chunk of streamAgent(elenaSystem, elenaMessages, model)) {
+      if (signal?.aborted) return;
+      if (chunk.kind === 'text') {
+        elenaText += chunk.text;
+        yield { type: 'token', agent: 'Elena', text: chunk.text };
+      } else if (chunk.kind === 'retry') {
+        yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
+      } else {
+        cumulative.input += chunk.inputTokens;
+        cumulative.output += chunk.outputTokens;
+        yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
+      }
+    }
+    transcript.push({ speaker: 'Elena', text: elenaText });
+    const elenaStance = parseStance(elenaText);
+    yield { type: 'turn-end', agent: 'Elena', round: followUpRound, stance: elenaStance };
+
+    // --- Marcus responds ---
+    yield { type: 'turn-start', agent: 'Marcus', round: followUpRound };
+    const marcusSystem = `${marcusPersona}\n\n## FOLLOW-UP MODE\nA final recommendation was reached. The user has a follow-up question and Elena has responded. React to her points in light of the follow-up question.`;
+
+    const marcusMessages = buildMessages('Marcus');
+    yield { type: 'debug', agent: 'Marcus', round: followUpRound, debug: { systemPrompt: marcusSystem, messages: marcusMessages } };
+
+    let marcusText = '';
+    for await (const chunk of streamAgent(marcusSystem, marcusMessages, model)) {
+      if (signal?.aborted) return;
+      if (chunk.kind === 'text') {
+        marcusText += chunk.text;
+        yield { type: 'token', agent: 'Marcus', text: chunk.text };
+      } else if (chunk.kind === 'retry') {
+        yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
+      } else {
+        cumulative.input += chunk.inputTokens;
+        cumulative.output += chunk.outputTokens;
+        yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
+      }
+    }
+    transcript.push({ speaker: 'Marcus', text: marcusText });
+    const marcusStance = parseStance(marcusText);
+    yield { type: 'turn-end', agent: 'Marcus', round: followUpRound, stance: marcusStance };
+
+    // --- Elena writes updated FINAL ---
+    yield { type: 'system', text: 'Writing updated final recommendation...' };
+    yield { type: 'turn-start', agent: 'Elena', round: followUpRound + 1 };
+
+    const finalMessages = buildMessages('Elena');
+    finalMessages.push({
+      role: 'user',
+      content: 'Based on this follow-up discussion, write an updated ## FINAL RECOMMENDATION block — Action, Direction, Conviction, Entry zone, Stop, Target(s), Position sizing note, Key risks, What invalidates the thesis.',
+    });
+
+    let finalText = '';
+    for await (const chunk of streamAgent(elenaSystem, finalMessages, model)) {
+      if (signal?.aborted) return;
+      if (chunk.kind === 'text') {
+        finalText += chunk.text;
+        yield { type: 'token', agent: 'Elena', text: chunk.text };
+      } else if (chunk.kind === 'retry') {
+        yield { type: 'system', text: `API overloaded — retrying (${chunk.attempt} of ${chunk.max})...` };
+      } else {
+        cumulative.input += chunk.inputTokens;
+        cumulative.output += chunk.outputTokens;
+        yield { type: 'usage', totalInputTokens: cumulative.input, totalOutputTokens: cumulative.output };
+      }
+    }
+
+    transcript.push({ speaker: 'Elena', text: finalText });
+    const newResumeState: ResumeState = { transcript, round: followUpRound + 2, lastElena: elenaStance, lastMarcus: marcusStance };
+    const tickers = extractTickers(originalRequest);
+    saveDebateCost(tickers.join(',') || 'unknown', followUpRound, cumulative.input, cumulative.output, model);
+    yield { type: 'final', text: finalText, resumeState: newResumeState };
+
+  } catch (e: any) {
+    let msg: string = e?.message || 'Unknown error';
+    try {
+      const parsed = JSON.parse(msg);
+      if (parsed?.error?.message) msg = `API error: ${parsed.error.message}`;
+      else if (parsed?.message) msg = parsed.message;
+    } catch {}
     if (e?.error?.message) msg = `API error: ${e.error.message}`;
     yield { type: 'error', text: msg };
   }
