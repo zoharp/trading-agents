@@ -16,6 +16,29 @@ function getCostUsd(inputTokens: number, outputTokens: number, model: string): n
   return (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
 }
 
+async function saveConclusion(tickers: string[], conclusion: string) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_KEY;
+  if (!supabaseUrl || !supabaseKey || tickers.length === 0) return;
+  const date = new Date().toISOString().split('T')[0];
+  try {
+    await Promise.all(tickers.map(ticker =>
+      fetch(`${supabaseUrl}/rest/v1/conclusions`, {
+        method: 'POST',
+        headers: {
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'resolution=merge-duplicates',
+        },
+        body: JSON.stringify({ ticker: ticker.toUpperCase(), date, conclusion }),
+      })
+    ));
+  } catch (e) {
+    console.error('Failed to save conclusion:', e);
+  }
+}
+
 async function saveDebateCost(ticker: string, rounds: number, inputTokens: number, outputTokens: number, model: string) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_KEY;
@@ -317,6 +340,7 @@ ${marketBlock}
 
       // Check if Elena delivered a FINAL recommendation already (consensus from prior round)
       if (elenaText.includes('## FINAL RECOMMENDATION') || elenaText.includes('## ESCALATION')) {
+        if (elenaText.includes('## FINAL RECOMMENDATION')) await saveConclusion(tickers, elenaText);
         yield { type: elenaText.includes('FINAL') ? 'final' : 'escalation', text: elenaText };
         return;
       }
@@ -413,6 +437,7 @@ ${marketBlock}
         transcript.push({ speaker: 'Elena', text: finalText });
         const finalResumeState: ResumeState = { transcript, round: round + 2, lastElena, lastMarcus };
         await saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
+        await saveConclusion(tickers, finalText);
         yield { type: 'final', text: finalText, resumeState: finalResumeState };
         return;
       }
@@ -448,6 +473,7 @@ ${marketBlock}
     }
     const escResumeState: ResumeState = { transcript, round: MAX_ROUNDS + 1, lastElena, lastMarcus };
     await saveDebateCost(tickers.join(',') || 'unknown', MAX_ROUNDS, cumulative.input, cumulative.output, model);
+    await saveConclusion(tickers, escText);
     yield { type: 'escalation', text: escText, resumeState: escResumeState };
 
   } catch (e: any) {
@@ -608,6 +634,7 @@ Note: A final recommendation was already reached in the previous debate. The use
     const newResumeState: ResumeState = { transcript, round: followUpRound + 2, lastElena: elenaStance, lastMarcus: marcusStance };
     const tickers = extractTickers(originalRequest);
     await saveDebateCost(tickers.join(',') || 'unknown', followUpRound, cumulative.input, cumulative.output, model);
+    await saveConclusion(tickers, finalText);
     yield { type: 'final', text: finalText, resumeState: newResumeState };
 
   } catch (e: any) {

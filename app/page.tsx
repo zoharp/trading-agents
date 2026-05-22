@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.1';
 
 interface ReleaseNote { version: string; date: string; changes: string[] }
 
@@ -122,11 +122,86 @@ function NumberHighlight({ text }: { text: string }) {
   );
 }
 
+const TICKER_STOPWORDS = new Set([
+  'I', 'A', 'THE', 'AND', 'OR', 'BUT', 'IF', 'IT', 'IS', 'TO', 'FOR', 'AT', 'IN', 'ON', 'MY', 'ME', 'WE',
+  'BUY', 'SELL', 'HOLD', 'LONG', 'SHORT', 'STOP', 'PUT', 'CALL', 'YES', 'NO', 'NEW', 'OLD',
+  'USD', 'EUR', 'GBP', 'JPY', 'YTD', 'MTD', 'QTD', 'EOD', 'EOW',
+  'CSP', 'CC', 'PMCC', 'IC', 'ICS', 'BWB', 'ITM', 'OTM', 'ATM', 'DTE', 'IV', 'HV', 'VIX',
+  'SMA', 'EMA', 'RSI', 'MACD', 'ATR', 'BB', 'OBV', 'CMF', 'ADX', 'MFI',
+  'PM', 'AH', 'AM', 'NOW', 'HIGH', 'LOW', 'MID', 'MAX', 'MIN',
+  'FINAL', 'STANCE', 'AGREE', 'NONE', 'KEY', 'NOTE', 'SPY', 'QQQ', 'IWM', 'DIA',
+]);
+
+function TickerChip({ ticker }: { ticker: string }) {
+  const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'empty'>('idle');
+  const [data, setData] = useState<{ date: string; conclusion: string } | null>(null);
+  const [visible, setVisible] = useState(false);
+
+  const onEnter = async () => {
+    setVisible(true);
+    if (status !== 'idle') return;
+    setStatus('loading');
+    try {
+      const res = await fetch(`/api/conclusions?ticker=${ticker}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json?.conclusion) { setData(json); setStatus('done'); }
+        else setStatus('empty');
+      } else setStatus('empty');
+    } catch { setStatus('empty'); }
+  };
+
+  return (
+    <span className="relative inline-block">
+      <span
+        className="text-[#9bbfcf] border-b border-dashed border-[#9bbfcf] cursor-help"
+        onMouseEnter={onEnter}
+        onMouseLeave={() => setVisible(false)}
+      >
+        {ticker}
+      </span>
+      {visible && status !== 'idle' && (
+        <div className="absolute z-50 bottom-full left-0 mb-1 w-72 bg-[#1a1a24] border border-[#334] rounded p-3 text-xs text-[#d8d6d1] shadow-xl pointer-events-none">
+          {status === 'loading' && <span className="text-[#666]">Loading...</span>}
+          {status === 'empty' && <span className="text-[#555]">No previous analysis for {ticker}</span>}
+          {status === 'done' && data && (
+            <>
+              <div className="text-[#666] mb-1 text-[10px]">{data.date}</div>
+              <div className="text-[#bbb] leading-relaxed" style={{ display: '-webkit-box', WebkitLineClamp: 5, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                {data.conclusion}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+const HIGHLIGHT_SPLIT = /(\b[A-Z]{2,5}\b|-?\$?(?:\d[\d,]*)(?:\.\d+)?%?)/g;
+
+function TextHighlight({ text }: { text: string }) {
+  const parts = text.split(HIGHLIGHT_SPLIT);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (NUM_TEST.test(part) && /\d/.test(part)) {
+          return <span key={i} className="text-[#7ec4cf] font-medium">{part}</span>;
+        }
+        if (/^[A-Z]{2,5}$/.test(part) && !TICKER_STOPWORDS.has(part)) {
+          return <TickerChip key={i} ticker={part} />;
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
 function colorizeChildren(children: React.ReactNode): React.ReactNode {
-  if (typeof children === 'string') return <NumberHighlight text={children} />;
+  if (typeof children === 'string') return <TextHighlight text={children} />;
   if (Array.isArray(children)) {
     return children.map((child, i) =>
-      typeof child === 'string' ? <NumberHighlight key={i} text={child} /> : child
+      typeof child === 'string' ? <TextHighlight key={i} text={child} /> : child
     );
   }
   return children;

@@ -1,5 +1,15 @@
 [
   {
+    "version": "0.4.1",
+    "date": "2026-05-22",
+    "changes": [
+      "🐛 **No-data short-circuit** — When market data is unavailable, Elena says \"No data for [TICKER].\" and the debate stops immediately — Marcus no longer runs.",
+      "🐛 **Elena: no CSP parameter blocking** — Elena now analyzes with available market data instead of asking for strike/DTE when the user didn't provide them.",
+      "🔍 **Supabase error messages** — Price fetch failures now report the exact reason: ticker not found, timeout, HTTP status + response body, or stale cache fallback.",
+      "🔍 **slow_data warnings surfaced** — Analyst/earnings data fetch failures now shown as ⚠️ system messages instead of being silently swallowed."
+    ]
+  },
+  {
     "version": "0.4.0",
     "date": "2026-05-21",
     "changes": [

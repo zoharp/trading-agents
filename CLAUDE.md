@@ -44,8 +44,8 @@ Production URL: `https://two-desk.vercel.app` (or your Vercel custom domain)
 
 ## Current versions
 
-- **Frontend:** `0.4.0`
-- **Backend:** `0.4.0`
+- **Frontend:** `0.4.1`
+- **Backend:** `0.4.1`
 - **Data Integration:** Supabase (stock-predictor) — live since May 17, 2026
 
 ---
