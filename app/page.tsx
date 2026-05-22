@@ -22,8 +22,8 @@ function ChangelogModal({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="relative w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-lg border border-[#2a2a2d]"
-        style={{ background: '#111114', padding: '28px 32px' }}
+        className="relative w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-lg border border-[#2a2a2d] px-5 py-6 sm:px-8 sm:py-7 mx-3 sm:mx-0"
+        style={{ background: '#111114' }}
         onClick={e => e.stopPropagation()}
       >
         <div className="flex justify-between items-center mb-6">
@@ -633,16 +633,16 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-[#0a0a0b] text-[#e8e6e1]">
+    <main className="min-h-screen bg-[#0a0a0b] text-[#e8e6e1] overflow-x-hidden">
       {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
-      <div className="flex gap-6 px-6 py-8 max-w-full mx-auto">
+      <div className="flex flex-col lg:flex-row gap-4 lg:gap-6 px-3 sm:px-6 py-4 sm:py-8 max-w-full mx-auto">
         {/* Main debate area */}
         <div className="flex-1 min-w-0">
           <header className="border-b border-[#2a2a2d] pb-6 mb-6">
             <div className="flex justify-between items-start mb-4">
               <div>
                 <div className="flex items-baseline gap-3">
-                  <h1 className="text-3xl font-bold tracking-tight">
+                  <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
                     <span className="text-[#d4a574]">two</span>
                     <span className="text-[#7a9eaf]">.desk</span>
                   </h1>
@@ -696,7 +696,7 @@ export default function Home() {
           </header>
 
           {/* Debate feed */}
-          <div ref={scrollRef} className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto pr-4 mb-6">
+          <div ref={scrollRef} className="space-y-4 max-h-[55vh] lg:max-h-[calc(100vh-200px)] overflow-y-auto pr-2 lg:pr-4 mb-6">
             {turns.length === 0 && !running && (
               <div className="text-[#666] text-sm italic">
                 Ask about a ticker or setup. e.g.{' '}
@@ -721,10 +721,9 @@ export default function Home() {
                   );
                 } else if (turn.kind === 'turn') {
                   const isElena = turn.agent === 'Elena';
-                  const colStart = isElena ? 'col-start-2' : '';
                   result.push(
-                    <div key={`turn-${result.length}`} className={`grid grid-cols-2 gap-4 ${colStart ? '' : ''}`}>
-                      <div className={isElena ? 'col-start-2' : ''}>
+                    <div key={`turn-${result.length}`} className="lg:grid lg:grid-cols-2 lg:gap-4">
+                      <div className={isElena ? 'lg:col-start-2' : ''}>
                         <ChatBubble
                           agent={turn.agent!}
                           text={turn.text}
@@ -783,7 +782,7 @@ export default function Home() {
         </div>
 
         {/* Right sidebar: Market data + Cost panel + Debug */}
-        <div className="w-96 shrink-0 flex flex-col gap-4">
+        <div className="w-full lg:w-96 lg:shrink-0 flex flex-col gap-4">
           {marketData && <MarketDataPanel data={marketData} />}
           <CostPanel cost={cost} sessionTotal={sessionCostTotal + (running ? cost.totalUsd : 0)} />
 
@@ -1136,7 +1135,7 @@ function MarketDataPanel({ data }: { data: Record<string, MarketSnapshot> }) {
 
 function CostPanel({ cost, sessionTotal }: { cost: Cost; sessionTotal: number }) {
   return (
-    <div className="sticky top-8 bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
+    <div className="lg:sticky lg:top-8 bg-[#15151a] border border-[#2a2a2d] rounded p-4 text-sm font-mono space-y-4">
       <div>
         <div className="text-xs font-bold text-[#888] mb-3 uppercase">Current Debate</div>
         <div className="space-y-2">
