@@ -203,9 +203,13 @@ export async function* runDebate(
       yield { type: 'system', text: `Fetching market data for: ${tickers.join(', ')}...` };
       for (const t of tickers) {
         try {
-          marketData[t] = await getTechnicalSnapshot(t);
+          const snap = await getTechnicalSnapshot(t);
+          marketData[t] = snap;
+          if ((snap as any).slowDataWarning) {
+            yield { type: 'system', text: `⚠️ ${(snap as any).slowDataWarning}` };
+          }
         } catch (e) {
-          yield { type: 'system', text: `Could not fetch ${t}: ${(e as Error).message}` };
+          yield { type: 'system', text: `❌ ${t}: ${(e as Error).message}` };
         }
       }
     }
@@ -317,6 +321,17 @@ ${marketBlock}
         return;
       }
 
+      // No data — Elena said so (conviction 0). Skip Marcus entirely.
+      if (elenaStance.conviction === 0) {
+        await saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
+        yield {
+          type: 'escalation',
+          text: elenaText,
+          resumeState: { transcript, round, lastElena: elenaStance, lastMarcus: null },
+        };
+        return;
+      }
+
       // --- Marcus's turn ---
       yield { type: 'turn-start', agent: 'Marcus', round };
       const marcusMessages = buildMessages('Marcus');
@@ -369,18 +384,6 @@ ${marketBlock}
           agreementScore,
         },
       };
-
-      // --- Blocked check: both agents have conviction 0 — missing data, can't proceed ---
-      if (lastElena.conviction === 0 && lastMarcus.conviction === 0) {
-        yield { type: 'system', text: 'Both agents are blocked — no ticker or critical data missing. Stopping debate.' };
-        await saveDebateCost(tickers.join(',') || 'unknown', round, cumulative.input, cumulative.output, model);
-        yield {
-          type: 'escalation',
-          text: '## ESCALATION — MISSING DATA\n\nBoth agents cannot proceed without a specific ticker and current price.\n\n**What they need:**\n- Which instrument? (e.g. TSLA, SPY, NVDA)\n- Current price or price level you\'re analyzing\n- Timeframe (daily, weekly?)\n\nPlease resubmit with a ticker symbol.',
-          resumeState: { transcript, round, lastElena, lastMarcus },
-        };
-        return;
-      }
 
       // --- Consensus check ---
       if (consensusReached(lastElena, lastMarcus)) {

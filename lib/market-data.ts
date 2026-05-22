@@ -185,7 +185,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 async function getSupabasePrices(symbol: string): Promise<any[]> {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_KEY;
-  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase credentials missing in environment');
+  if (!supabaseUrl || !supabaseKey) throw new Error('Supabase credentials not set — check SUPABASE_URL and SUPABASE_KEY in .env.local');
 
   const allRows: any[] = [];
   const pageSize = 1000;
@@ -199,64 +199,104 @@ async function getSupabasePrices(symbol: string): Promise<any[]> {
     url.searchParams.append('offset', offset.toString());
     url.searchParams.append('limit', pageSize.toString());
 
-    const response = await withTimeout(
-      fetch(url.toString(), {
-        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-      }),
-      25000
-    );
-    if (!response.ok) throw new Error(`Supabase error: HTTP ${response.status}`);
+    let response: Response;
+    try {
+      response = await withTimeout(
+        fetch(url.toString(), {
+          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+        }),
+        25000
+      );
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (msg.includes('Timeout')) throw new Error(`Supabase timed out after 25s fetching ${symbol} — database may be slow or unreachable`);
+      throw new Error(`Network error fetching ${symbol} from Supabase: ${msg}`);
+    }
+
+    if (!response.ok) {
+      let body = '';
+      try { body = await response.text(); } catch {}
+      let detail = body;
+      try {
+        const parsed = JSON.parse(body);
+        detail = parsed?.message || parsed?.error || body;
+      } catch {}
+      throw new Error(`Supabase HTTP ${response.status} fetching ${symbol}: ${detail || response.statusText}`);
+    }
 
     const rows = await response.json();
     allRows.push(...rows);
     if (rows.length < pageSize) break;
     offset += pageSize;
   }
+
+  if (allRows.length === 0) {
+    throw new Error(`${symbol} not found in Supabase prices table — ticker may not be tracked by stock-predictor`);
+  }
+
   return allRows;
 }
 
 // Fetch all slow_data rows for a ticker (analyst, earnings, put/call, etc.)
-async function getSlowData(symbol: string): Promise<Record<string, any>> {
+// Returns empty object on failure — slow_data is optional enrichment, not required for debate.
+async function getSlowData(symbol: string): Promise<{ data: Record<string, any>; warning?: string }> {
   const supabaseUrl = process.env.SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_KEY;
-  if (!supabaseUrl || !supabaseKey) return {};
+  if (!supabaseUrl || !supabaseKey) return { data: {}, warning: 'Supabase credentials not set — slow_data skipped' };
 
   try {
     const url = new URL(`${supabaseUrl}/rest/v1/slow_data`);
     url.searchParams.append('select', 'call_name,payload');
     url.searchParams.append('ticker', `eq.${symbol.toUpperCase()}`);
 
-    const response = await withTimeout(
-      fetch(url.toString(), {
-        headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
-      }),
-      10000
-    );
-    if (!response.ok) return {};
+    let response: Response;
+    try {
+      response = await withTimeout(
+        fetch(url.toString(), {
+          headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}` },
+        }),
+        10000
+      );
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      const warning = msg.includes('Timeout')
+        ? `slow_data timed out for ${symbol} — analyst/earnings data unavailable`
+        : `slow_data network error for ${symbol}: ${msg}`;
+      return { data: {}, warning };
+    }
+
+    if (!response.ok) {
+      let body = '';
+      try { body = await response.text(); } catch {}
+      let detail = body;
+      try { const p = JSON.parse(body); detail = p?.message || p?.error || body; } catch {}
+      return { data: {}, warning: `slow_data HTTP ${response.status} for ${symbol}: ${detail || response.statusText}` };
+    }
 
     const rows: { call_name: string; payload: any }[] = await response.json();
-    const result: Record<string, any> = {};
-    for (const row of rows) result[row.call_name] = row.payload;
-    return result;
-  } catch {
-    return {};
+    const data: Record<string, any> = {};
+    for (const row of rows) data[row.call_name] = row.payload;
+    return { data };
+  } catch (e: any) {
+    return { data: {}, warning: `slow_data unexpected error for ${symbol}: ${(e as Error).message}` };
   }
 }
 
-export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSnapshot> {
+export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSnapshot & { slowDataWarning?: string }> {
   // Always fetch live — cache only used as fallback if fetch fails
   let result: any;
   let slowData: Record<string, any> = {};
+  let slowDataWarning: string | undefined;
 
   try {
     // Fetch prices and slow_data in parallel
-    const [rows, slow] = await Promise.all([
+    const [rows, slowResult] = await Promise.all([
       getSupabasePrices(symbol),
       getSlowData(symbol),
     ]);
 
-    if (!rows || rows.length === 0) throw new Error('No data returned from Supabase');
-    slowData = slow;
+    slowData = slowResult.data;
+    slowDataWarning = slowResult.warning;
 
     result = {
       timestamp: rows.map((r: any) => Math.floor(new Date(r.date).getTime() / 1000)),
@@ -273,8 +313,11 @@ export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSna
   } catch (e) {
     const cache = loadCache();
     const staleEntry = cache[symbol.toUpperCase()];
-    if (staleEntry) return staleEntry.data;
-    throw new Error(`Failed to fetch ${symbol} and no cached data available: ${(e as Error).message}`);
+    if (staleEntry) {
+      console.warn(`[market-data] Using stale cache for ${symbol} — live fetch failed: ${(e as Error).message}`);
+      return { ...staleEntry.data, slowDataWarning: `Using stale cached data for ${symbol} — live fetch failed: ${(e as Error).message}` };
+    }
+    throw e;
   }
 
   const timestamps = result.timestamp || [];
@@ -445,7 +488,7 @@ export async function getTechnicalSnapshot(symbol: string): Promise<TechnicalSna
   };
 
   updateCache(symbol, snapshot);
-  return snapshot;
+  return { ...snapshot, ...(slowDataWarning && { slowDataWarning }) };
 }
 
 export function extractTickers(text: string): string[] {
